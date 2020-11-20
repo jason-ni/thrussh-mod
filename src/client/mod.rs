@@ -169,6 +169,7 @@ enum Msg {
     },
 }
 
+#[derive(Debug)]
 enum OpenChannelMsg {
     Open {
         id: ChannelId,
@@ -312,7 +313,9 @@ impl Handle {
                 None => {
                     return Err(Error::Disconnect.into());
                 }
-                _ => {}
+                msg => {
+                    debug!("msg = {:?}", msg);
+                }
             }
         }
     }
@@ -609,34 +612,47 @@ impl Channel {
         Ok(())
     }
 
-    /// Send data to a channel. The number of bytes added to the
-    /// "sending pipeline" (to be processed by the event loop) is
-    /// returned.
-    pub async fn data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(&mut self, data: R) -> Result<(), anyhow::Error> {
+    /// Send data to a channel.
+    pub async fn data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(
+        &mut self,
+        data: R,
+    ) -> Result<(), anyhow::Error> {
         self.send_data(None, data).await
     }
 
     /// Send data to a channel. The number of bytes added to the
     /// "sending pipeline" (to be processed by the event loop) is
     /// returned.
-    pub async fn extended_data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(&mut self, ext: u32, data: R) -> Result<(), anyhow::Error> {
+    pub async fn extended_data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(
+        &mut self,
+        ext: u32,
+        data: R,
+    ) -> Result<(), anyhow::Error> {
         self.send_data(Some(ext), data).await
     }
 
-    async fn send_data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(&mut self, ext: Option<u32>, mut data: R) -> Result<(), anyhow::Error> {
+    async fn send_data<R: tokio::io::AsyncReadExt + std::marker::Unpin>(
+        &mut self,
+        ext: Option<u32>,
+        mut data: R,
+    ) -> Result<(), anyhow::Error> {
+        let mut total = 0;
         loop {
             debug!(
-                "sending data, self.window_size = {:?}, self.max_packet_size = {:?}",
-                self.window_size, self.max_packet_size
+                "sending data, self.window_size = {:?}, self.max_packet_size = {:?}, total = {:?}",
+                self.window_size, self.max_packet_size, total
             );
             let sendable = self.window_size.min(self.max_packet_size) as usize;
             let mut c = CryptoVec::new_zeroed(sendable);
             let n = data.read(&mut c[..]).await?;
+            total += n;
             c.resize(n);
             self.window_size -= n as u32;
             self.send_data_packet(ext, c).await?;
-            if self.window_size > 0 || n == 0 {
-                break
+            if sendable > 0 && n == 0 {
+                break;
+            } else if self.window_size > 0 {
+                continue;
             }
             // wait for the window to be restored.
             loop {
@@ -676,7 +692,10 @@ impl Channel {
                 }
             })
             .await
-            .map_err(|_| Error::SendError)?;
+            .map_err(|e| {
+                error!("{:?}", e);
+                Error::SendError
+            })?;
         Ok(())
     }
 
@@ -695,8 +714,8 @@ impl Channel {
             match self.receiver.recv().await {
                 Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
                     self.window_size += new_size;
-                    return Some(ChannelMsg::WindowAdjusted { new_size })
-                },
+                    return Some(ChannelMsg::WindowAdjusted { new_size });
+                }
                 Some(OpenChannelMsg::Msg(msg)) => return Some(msg),
                 None => return None,
                 _ => {}
@@ -750,7 +769,10 @@ where
     let (sender, receiver) = channel(10);
     let (sender2, receiver2) = unbounded_channel();
     if config.maximum_packet_size > 65535 {
-        error!("Maximum packet size ({:?}) should not larger than a TCP packet (65535)", config.maximum_packet_size);
+        error!(
+            "Maximum packet size ({:?}) should not larger than a TCP packet (65535)",
+            config.maximum_packet_size
+        );
     }
     let mut session = Session {
         target_window_size: config.window_size,
@@ -785,8 +807,8 @@ impl Session {
         handler: H,
     ) -> Result<(), anyhow::Error> {
         self.flush()?;
-        debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
         if !self.common.write_buffer.buffer.is_empty() {
+            debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
             stream.write_all(&self.common.write_buffer.buffer).await?;
             stream.flush().await?;
         }
@@ -822,10 +844,9 @@ impl Session {
                     }
                     self = reply(self, &mut handler, &buf[..]).await?;
                 }
-                msg = self.receiver.recv() => {
+                msg = self.receiver.recv(), if !self.is_rekeying() => {
                     match msg {
                         Some(Msg::Authenticate { user, method }) => {
-                            debug!("authenticate");
                             self.write_auth_request_if_needed(&user, method);
                         }
                         Some(Msg::Signed { .. }) => {},
@@ -850,7 +871,7 @@ impl Session {
                         Some(Msg::Disconnect { reason, description, language_tag }) => {
                             self.disconnect(reason, &description, &language_tag)
                         },
-                        Some(Msg::Data { data, id }) => { self.data(id, data); },
+                        Some(Msg::Data { data, id }) => { self.data(id, data) },
                         Some(Msg::Eof { id }) => { self.eof(id); },
                         Some(Msg::ExtendedData { data, ext, id }) => { self.extended_data(id, ext, data); },
                         Some(Msg::RequestPty { id, want_reply, term, col_width, row_height, pix_width, pix_height, terminal_modes }) => {
@@ -911,6 +932,14 @@ impl Session {
         }
         Ok(())
     }
+
+    fn is_rekeying(&self) -> bool {
+        if let Some(ref enc) = self.common.encrypted {
+            enc.rekey.is_some()
+        } else {
+            true
+        }
+    }
 }
 
 impl Session {
@@ -947,14 +976,17 @@ impl Session {
                 &mut self.common.cipher,
                 &mut self.common.write_buffer,
             ) {
-                if let Some(exchange) = std::mem::replace(&mut enc.exchange, None) {
-                    let mut kexinit = KexInit::initiate_rekey(exchange, &enc.session_id);
-                    kexinit.client_write(
-                        &self.common.config.as_ref(),
-                        &mut self.common.cipher,
-                        &mut self.common.write_buffer,
-                    )?;
-                    enc.rekey = Some(Kex::KexInit(kexinit))
+                info!("Re-exchanging keys");
+                if enc.rekey.is_none() {
+                    if let Some(exchange) = std::mem::replace(&mut enc.exchange, None) {
+                        let mut kexinit = KexInit::initiate_rekey(exchange, &enc.session_id);
+                        kexinit.client_write(
+                            &self.common.config.as_ref(),
+                            &mut self.common.cipher,
+                            &mut self.common.write_buffer,
+                        )?;
+                        enc.rekey = Some(Kex::KexInit(kexinit))
+                    }
                 }
             }
         }
@@ -965,40 +997,39 @@ thread_local! {
     static HASH_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
 }
 
-impl Session {
+impl KexDhDone {
     async fn server_key_check<H: Handler>(
-        &mut self,
+        mut self,
+        rekey: bool,
         handler: &mut Option<H>,
-        mut kexdhdone: KexDhDone,
         buf: &[u8],
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<Kex, anyhow::Error> {
         let mut reader = buf.reader(1);
         let pubkey = reader.read_string()?; // server public key.
         let pubkey = parse_public_key(pubkey)?;
         debug!("server_public_Key: {:?}", pubkey);
-        let h = handler.take().unwrap();
-        let (h, check) = h.check_server_key(&pubkey).await?;
-        *handler = Some(h);
-        if !check {
-            return Err(Error::UnknownKey.into());
+        if !rekey {
+            let h = handler.take().unwrap();
+            let (h, check) = h.check_server_key(&pubkey).await?;
+            *handler = Some(h);
+            if !check {
+                return Err(Error::UnknownKey.into());
+            }
         }
         HASH_BUFFER.with(|buffer| {
             let mut buffer = buffer.borrow_mut();
             buffer.clear();
             let hash = {
                 let server_ephemeral = reader.read_string()?;
-                kexdhdone.exchange.server_ephemeral.extend(server_ephemeral);
+                self.exchange.server_ephemeral.extend(server_ephemeral);
                 let signature = reader.read_string()?;
 
-                kexdhdone
+                self.kex
+                    .compute_shared_secret(&self.exchange.server_ephemeral)?;
+                debug!("kexdhdone.exchange = {:?}", self.exchange);
+                let hash = self
                     .kex
-                    .compute_shared_secret(&kexdhdone.exchange.server_ephemeral)?;
-                debug!("kexdhdone.exchange = {:?}", kexdhdone.exchange);
-                let hash = kexdhdone.kex.compute_exchange_hash(
-                    &pubkey,
-                    &kexdhdone.exchange,
-                    &mut buffer,
-                )?;
+                    .compute_exchange_hash(&pubkey, &self.exchange, &mut buffer)?;
                 debug!("exchange hash: {:?}", hash);
                 let signature = {
                     let mut sig_reader = signature.reader(0);
@@ -1009,19 +1040,15 @@ impl Session {
                 use thrussh_keys::key::Verify;
                 debug!("signature: {:?}", signature);
                 if !pubkey.verify_server_auth(hash.as_ref(), signature) {
+                    debug!("wrong server sig");
                     return Err(Error::WrongServerSig.into());
                 }
                 hash
             };
-            let mut newkeys = kexdhdone.compute_keys(hash, false)?;
-            self.common
-                .cipher
-                .write(&[msg::NEWKEYS], &mut self.common.write_buffer);
+            let mut newkeys = self.compute_keys(hash, false)?;
             newkeys.sent = true;
-            self.common.kex = Some(Kex::NewKeys(newkeys));
-            Ok::<(), anyhow::Error>(())
-        })?;
-        Ok(())
+            Ok(Kex::NewKeys(newkeys))
+        })
     }
 }
 
@@ -1053,7 +1080,11 @@ async fn reply<H: Handler>(
                 Ok(session)
             } else if buf[0] == msg::KEX_ECDH_REPLY {
                 // We've sent ECDH_INIT, waiting for ECDH_REPLY
-                session.server_key_check(handler, kexdhdone, buf).await?;
+                session.common.kex = Some(kexdhdone.server_key_check(false, handler, buf).await?);
+                session
+                    .common
+                    .cipher
+                    .write(&[msg::NEWKEYS], &mut session.common.write_buffer);
                 session.flush()?;
                 Ok(session)
             } else {
@@ -1066,16 +1097,23 @@ async fn reply<H: Handler>(
             if buf[0] != msg::NEWKEYS {
                 return Err(Error::Kex.into());
             }
+            let is_first_time = session.common.encrypted.is_none();
             session.common.encrypted(
-                EncryptedState::WaitingServiceRequest { accepted: false },
+                EncryptedState::WaitingServiceRequest {
+                    accepted: false,
+                    sent: is_first_time,
+                },
                 newkeys,
             );
+            if is_first_time {
+                debug!("sending ssh-userauth service requset");
+                let p = b"\x05\0\0\0\x0Cssh-userauth";
+                session
+                    .common
+                    .cipher
+                    .write(p, &mut session.common.write_buffer);
+            }
             // Ok, NEWKEYS received, now encrypted.
-            let p = b"\x05\0\0\0\x0Cssh-userauth";
-            session
-                .common
-                .cipher
-                .write(p, &mut session.common.write_buffer);
             Ok(session)
         }
         Some(kex) => {
@@ -1185,11 +1223,7 @@ pub trait Handler: Sized {
 
     /// Called when the server signals success.
     #[allow(unused_variables)]
-    fn channel_success(
-        self,
-        channel: ChannelId,
-        session: Session,
-    ) -> Self::FutureUnit {
+    fn channel_success(self, channel: ChannelId, session: Session) -> Self::FutureUnit {
         if let Some(chan) = session.channels.get(&channel) {
             chan.send(OpenChannelMsg::Msg(ChannelMsg::Success))
                 .unwrap_or(())

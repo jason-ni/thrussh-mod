@@ -38,14 +38,23 @@ impl Session {
 
         let mut enc = self.common.encrypted.as_mut().unwrap();
         if buf[0] == msg::KEXINIT {
-            // If we're not currently rekeying, but buf is a rekey request
-            if let Some(exchange) = enc.exchange.take() {
+            debug!("Received rekeying request");
+            // If we're not currently rekeying, but `buf` is a rekey request
+            if let Some(Kex::KexInit(kexinit)) = enc.rekey.take() {
+                enc.rekey = Some(kexinit.server_parse(
+                    self.common.config.as_ref(),
+                    &self.common.cipher,
+                    buf,
+                    &mut self.common.write_buffer,
+                )?);
+                self.flush()?;
+            } else if let Some(exchange) = enc.exchange.take() {
                 let kexinit = KexInit::received_rekey(
                     exchange,
                     negotiation::Server::read_kex(buf, &self.common.config.as_ref().preferred)?,
                     &enc.session_id,
                 );
-                self.common.kex = Some(kexinit.server_parse(
+                enc.rekey = Some(kexinit.server_parse(
                     self.common.config.as_ref(),
                     &mut self.common.cipher,
                     buf,
@@ -54,18 +63,33 @@ impl Session {
             }
             return Ok(self);
         }
+
+        match enc.rekey.take() {
+            Some(Kex::KexDh(kexdh)) => {
+                enc.rekey = Some(kexdh.parse(
+                    self.common.config.as_ref(),
+                    &self.common.cipher,
+                    buf,
+                    &mut self.common.write_buffer,
+                )?);
+                return Ok(self);
+            }
+            Some(Kex::NewKeys(newkeys)) => {
+                if buf[0] != msg::NEWKEYS {
+                    return Err(Error::Kex.into());
+                }
+                // Ok, NEWKEYS received, now encrypted.
+                self.common.newkeys(newkeys);
+                return Ok(self);
+            }
+            rek => enc.rekey = rek,
+        }
+
         // If we've successfully read a packet.
-        // debug!("state = {:?}, buf = {:?}", self.0.state, buf);
-        debug!(
-            "state = {:?} {:?} {:?}",
-            enc.state,
-            buf[0],
-            msg::SERVICE_REQUEST
-        );
         match enc.state {
-            EncryptedState::WaitingServiceRequest { ref mut accepted }
-                if buf[0] == msg::SERVICE_REQUEST =>
-            {
+            EncryptedState::WaitingServiceRequest {
+                ref mut accepted, ..
+            } if buf[0] == msg::SERVICE_REQUEST => {
                 let mut r = buf.reader(1);
                 let request = r.read_string()?;
                 debug!("request: {:?}", std::str::from_utf8(request));

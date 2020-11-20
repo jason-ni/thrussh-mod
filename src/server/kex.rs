@@ -19,19 +19,15 @@ impl KexInit {
         write_buffer: &mut SSHBuffer,
     ) -> Result<Kex, anyhow::Error> {
         if buf[0] == msg::KEXINIT {
-            debug!("server parse {:?}", &write_buffer.buffer[..]);
-            let algo = if self.algo.is_none() {
+            let algo = {
                 // read algorithms from packet.
                 self.exchange.client_kex_init.extend(buf);
                 super::negotiation::Server::read_kex(buf, &config.preferred)?
-            } else {
-                return Err(Error::Kex.into());
             };
             if !self.sent {
                 self.server_write(config, cipher, write_buffer)?
             }
             let mut key = 0;
-            debug!("config {:?} algo {:?}", config.keys, algo.key);
             while key < config.keys.len() && config.keys[key].name() != algo.key.as_ref() {
                 key += 1
             }
@@ -75,14 +71,12 @@ impl KexDh {
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<Kex, anyhow::Error> {
-        debug!("KexDh: parse {:?}", self.names.ignore_guessed);
         if self.names.ignore_guessed {
             // If we need to ignore this packet.
             self.names.ignore_guessed = false;
             Ok(Kex::KexDh(self))
         } else {
             // Else, process it.
-            debug!("buf = {:?}", buf);
             assert!(buf[0] == msg::KEX_ECDH_INIT);
             let mut r = buf.reader(1);
             self.exchange.client_ephemeral.extend(r.read_string()?);
@@ -112,7 +106,7 @@ impl KexDh {
                 // Server ephemeral
                 buffer.extend_ssh_string(&kexdhdone.exchange.server_ephemeral);
                 // Hash signature
-                debug!(" >>>>>>>>>>>>>>> signing with key {:?}", kexdhdone.key);
+                debug!("signing with key {:?}", kexdhdone.key);
                 debug!("hash: {:?}", hash);
                 debug!("key: {:?}", config.keys[kexdhdone.key]);
                 config.keys[kexdhdone.key].add_signature(&mut buffer, &hash)?;

@@ -54,9 +54,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for SshRead<R> {
         if let Some(mut id) = self.id.take() {
             debug!("id {:?} {:?}", id.total, id.bytes_read);
             if id.total > id.bytes_read {
-                let result = {
-                    buf.put_slice(&id.buf[id.bytes_read..id.total])
-                };
+                let result = { buf.put_slice(&id.buf[id.bytes_read..id.total]) };
                 debug!("read {:?} bytes from id.buf", result);
                 id.bytes_read += id.total - id.bytes_read;
                 self.id = Some(id);

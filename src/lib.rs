@@ -191,7 +191,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!   let config = thrussh::client::Config::default();
+//!   let config = thrussh::client::Config::COMPRESSED;
 //!   let config = Arc::new(config);
 //!   let sh = Client{};
 //!
@@ -201,7 +201,7 @@
 //!   let mut session = thrussh::client::connect(config, "localhost:22", sh).await.unwrap();
 //!   if session.authenticate_future(std::env::var("USER").unwrap(), key.clone_public_key(), agent).await.unwrap().1 {
 //!     let mut channel = session.channel_open_session().await.unwrap();
-//!     channel.data(&b"Hello, world!"[..]).await.unwrap();
+//!     channel.data(b"Hello, world!").await.unwrap();
 //!     if let Some(msg) = channel.wait().await {
 //!         println!("{:?}", msg)
 //!     }
@@ -430,9 +430,9 @@ impl<T: 'static> FromFinished<T>
 /// The number of bytes read/written, and the number of seconds before a key re-exchange is requested.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    rekey_write_limit: usize,
-    rekey_read_limit: usize,
-    rekey_time_limit: std::time::Duration,
+    pub rekey_write_limit: usize,
+    pub rekey_read_limit: usize,
+    pub rekey_time_limit: std::time::Duration,
 }
 
 impl Limits {
@@ -619,12 +619,12 @@ mod test_compress {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(threaded_scheduler)]
     async fn compress_local_test() {
         test_compress(true).await
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(threaded_scheduler)]
     async fn compress_test() {
         test_compress(false).await
     }
@@ -637,7 +637,7 @@ mod test_compress {
             let mut config = super::server::Config::default();
             config.preferred = super::Preferred::COMPRESSED;
             config.auth_rejection_time = std::time::Duration::from_secs(0);
-            config.connection_timeout = None;
+            config.connection_timeout = None; // Some(std::time::Duration::from_secs(3));
             config.auth_rejection_time = std::time::Duration::from_secs(3);
             config
                 .keys
@@ -653,7 +653,7 @@ mod test_compress {
             (client_key, "127.0.0.1:2222")
         } else {
             let client_key = thrussh_keys::load_secret_key("id_ed25519", None).unwrap();
-            (client_key, "127.0.0.1:22")
+            (client_key, "127.0.0.1:2222")
         };
 
         let mut config = super::client::Config::default();
@@ -670,8 +670,7 @@ mod test_compress {
         {
             debug!("authenticated");
             if let Ok(mut channel) = session.channel_open_session().await {
-                debug!("sending data");
-                channel.data(&b"Hello, world!"[..]).await.unwrap();
+                channel.data(b"Hello, world!").await.unwrap();
                 if let Some(msg) = channel.wait().await {
                     println!("{:?}", msg)
                 }
@@ -717,16 +716,14 @@ mod test_compress {
                 let mut clients = self.clients.lock().unwrap();
                 clients.insert((self.id, channel), session.handle());
             }
-            debug!("server: channel_open_session {:?}", channel);
             self.finished(session)
         }
         fn auth_publickey(self, _: &str, _: &thrussh_keys::key::PublicKey) -> Self::FutureAuth {
             debug!("auth_publickey");
             self.finished_auth(server::Auth::Accept)
         }
-        fn data(self, channel: ChannelId, data: &[u8], mut session: Session) -> Self::FutureUnit {
+        fn data(self, _channel: ChannelId, data: &[u8], session: Session) -> Self::FutureUnit {
             debug!("server data = {:?}", std::str::from_utf8(data));
-            session.data(channel, CryptoVec::from_slice(data));
             self.finished(session)
         }
     }
@@ -749,6 +746,29 @@ mod test_compress {
         ) -> Self::FutureBool {
             println!("check_server_key: {:?}", server_public_key);
             self.finished_bool(true)
+        }
+        fn channel_open_confirmation(
+            self,
+            channel: ChannelId,
+            _: u32,
+            _: u32,
+            session: client::Session,
+        ) -> Self::FutureUnit {
+            println!("channel_open_confirmation: {:?}", channel);
+            self.finished(session)
+        }
+        fn data(
+            self,
+            channel: ChannelId,
+            data: &[u8],
+            session: client::Session,
+        ) -> Self::FutureUnit {
+            debug!(
+                "client data on channel {:?}: {:?}",
+                channel,
+                std::str::from_utf8(data)
+            );
+            self.finished(session)
         }
     }
 }

@@ -90,7 +90,7 @@ impl Named for PublicKey {
     fn name(&self) -> &'static str {
         match self {
             &PublicKey::Ed25519(_) => ED25519.0,
-            &PublicKey::RSA { .. } => SSH_RSA,
+            &PublicKey::RSA { .. } => SSH_RSA.0,
         }
     }
 }

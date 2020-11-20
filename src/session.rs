@@ -62,36 +62,38 @@ pub(crate) struct CommonSession<Config> {
 }
 
 impl<C> CommonSession<C> {
-    pub fn encrypted(&mut self, state: EncryptedState, newkeys: NewKeys) {
+    pub fn newkeys(&mut self, newkeys: NewKeys) {
         if let Some(ref mut enc) = self.encrypted {
             enc.exchange = Some(newkeys.exchange);
             enc.kex = newkeys.kex;
             enc.key = newkeys.key;
             enc.mac = newkeys.names.mac;
             self.cipher = Arc::new(newkeys.cipher);
-        } else {
-            self.encrypted = Some(Encrypted {
-                exchange: Some(newkeys.exchange),
-                kex: newkeys.kex,
-                key: newkeys.key,
-                mac: newkeys.names.mac,
-                session_id: newkeys.session_id,
-                state,
-                rekey: None,
-                channels: HashMap::new(),
-                last_channel_id: Wrapping(1),
-                wants_reply: false,
-                write: CryptoVec::new(),
-                write_cursor: 0,
-                last_rekey: std::time::Instant::now(),
-                server_compression: newkeys.names.server_compression,
-                client_compression: newkeys.names.client_compression,
-                compress: crate::compression::Compress::None,
-                compress_buffer: CryptoVec::new(),
-                decompress: crate::compression::Decompress::None,
-            });
-            self.cipher = Arc::new(newkeys.cipher);
         }
+    }
+
+    pub fn encrypted(&mut self, state: EncryptedState, newkeys: NewKeys) {
+        self.encrypted = Some(Encrypted {
+            exchange: Some(newkeys.exchange),
+            kex: newkeys.kex,
+            key: newkeys.key,
+            mac: newkeys.names.mac,
+            session_id: newkeys.session_id,
+            state,
+            rekey: None,
+            channels: HashMap::new(),
+            last_channel_id: Wrapping(1),
+            wants_reply: false,
+            write: CryptoVec::new(),
+            write_cursor: 0,
+            last_rekey: std::time::Instant::now(),
+            server_compression: newkeys.names.server_compression,
+            client_compression: newkeys.names.client_compression,
+            compress: crate::compression::Compress::None,
+            compress_buffer: CryptoVec::new(),
+            decompress: crate::compression::Decompress::None,
+        });
+        self.cipher = Arc::new(newkeys.cipher);
     }
 
     /// Send a disconnect message.
@@ -185,7 +187,7 @@ impl Encrypted {
                 pending_size += size_;
                 if size_ < buf.len() {
                     channel.pending_data.push_front((buf, a, size_));
-                    break
+                    break;
                 }
             }
         }
@@ -200,7 +202,12 @@ impl Encrypted {
         }
     }
 
-    fn data_noqueue(write: &mut CryptoVec, channel: &mut Channel, buf0: CryptoVec, from: usize) -> (CryptoVec, usize) {
+    fn data_noqueue(
+        write: &mut CryptoVec,
+        channel: &mut Channel,
+        buf0: CryptoVec,
+        from: usize,
+    ) -> (CryptoVec, usize) {
         use std::ops::Deref;
         let mut buf = if buf0.len() as u32 > channel.recipient_window_size {
             &buf0[from..channel.recipient_window_size as usize]
@@ -283,30 +290,17 @@ impl Encrypted {
         // If there are pending packets (and we've not started to rekey), flush them.
         {
             while self.write_cursor < self.write.len() {
-                let now = std::time::Instant::now();
-                let dur = now.duration_since(self.last_rekey);
-
-                if write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit
-                {
-                    // Resetting those now is not strictly correct
-                    // (since we're resetting before the rekeying),
-                    // but since the bytes sent during rekeying will
-                    // be counted, the limits are still an upper bound
-                    // on the size that can be sent.
-                    write_buffer.bytes = 0;
-                    self.last_rekey = now;
-                    return true;
-                } else {
-                    // Read a single packet, encrypt and send it.
-                    let len = BigEndian::read_u32(&self.write[self.write_cursor..]) as usize;
-                    debug!("flushing len {:?}", len);
-                    let packet = self.compress.compress(
+                // Read a single packet, encrypt and send it.
+                let len = BigEndian::read_u32(&self.write[self.write_cursor..]) as usize;
+                let packet = self
+                    .compress
+                    .compress(
                         &self.write[(self.write_cursor + 4)..(self.write_cursor + 4 + len)],
                         &mut self.compress_buffer,
-                    ).unwrap();
-                    cipher.write(packet, write_buffer);
-                    self.write_cursor += 4 + len
-                }
+                    )
+                    .unwrap();
+                cipher.write(packet, write_buffer);
+                self.write_cursor += 4 + len
             }
         }
         if self.write_cursor >= self.write.len() {
@@ -314,7 +308,9 @@ impl Encrypted {
             self.write_cursor = 0;
             self.write.clear();
         }
-        false
+        let now = std::time::Instant::now();
+        let dur = now.duration_since(self.last_rekey);
+        write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit
     }
     pub fn new_channel_id(&mut self) -> ChannelId {
         self.last_channel_id += Wrapping(1);
@@ -351,7 +347,7 @@ impl Encrypted {
 
 #[derive(Debug)]
 pub enum EncryptedState {
-    WaitingServiceRequest { accepted: bool },
+    WaitingServiceRequest { sent: bool, accepted: bool },
     WaitingAuthRequest(auth::AuthRequest),
     InitCompression,
     Authenticated,

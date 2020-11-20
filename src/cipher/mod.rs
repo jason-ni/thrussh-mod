@@ -177,6 +177,7 @@ impl CipherPair {
 
         key.seal(buffer.seqn.0, plaintext, tag);
 
+        buffer.bytes += payload.len();
         // Sequence numbers are on 32 bits and wrap.
         // https://tools.ietf.org/html/rfc4253#section-6.4
         buffer.seqn += Wrapping(1);

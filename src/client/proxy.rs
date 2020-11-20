@@ -37,7 +37,7 @@ impl AsyncRead for Stream {
                 let n = c.stdout.as_mut().unwrap().read(buf.initialize_unfilled())?;
                 buf.advance(n);
                 Poll::Ready(Ok(()))
-            },
+            }
             Stream::Tcp(ref mut t) => AsyncRead::poll_read(Pin::new(t), cx, buf),
         }
     }

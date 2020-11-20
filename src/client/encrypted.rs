@@ -35,19 +35,30 @@ impl super::Session {
         client: &mut Option<C>,
         buf: &[u8],
     ) -> Result<Self, anyhow::Error> {
-        debug!("client_read_encrypted");
+        debug!(
+            "client_read_encrypted, buf = {:?}",
+            &buf[..buf.len().min(100)]
+        );
         // Either this packet is a KEXINIT, in which case we start a key re-exchange.
         if buf[0] == msg::KEXINIT {
             // Now, if we're encrypted:
             if let Some(ref mut enc) = self.common.encrypted {
                 // If we're not currently rekeying, but buf is a rekey request
-                if let Some(exchange) = std::mem::replace(&mut enc.exchange, None) {
+                if let Some(Kex::KexInit(kexinit)) = enc.rekey.take() {
+                    enc.rekey = Some(Kex::KexDhDone(kexinit.client_parse(
+                        self.common.config.as_ref(),
+                        &self.common.cipher,
+                        buf,
+                        &mut self.common.write_buffer,
+                    )?));
+                    self.flush()?;
+                } else if let Some(exchange) = std::mem::replace(&mut enc.exchange, None) {
                     let kexinit = KexInit::received_rekey(
                         exchange,
                         negotiation::Client::read_kex(buf, &self.common.config.as_ref().preferred)?,
                         &enc.session_id,
                     );
-                    self.common.kex = Some(Kex::KexDhDone(kexinit.client_parse(
+                    enc.rekey = Some(Kex::KexDhDone(kexinit.client_parse(
                         self.common.config.as_ref(),
                         &mut self.common.cipher,
                         buf,
@@ -59,12 +70,51 @@ impl super::Session {
             }
             return Ok(self);
         }
+
+        if let Some(ref mut enc) = self.common.encrypted {
+            match enc.rekey.take() {
+                Some(Kex::KexDhDone(mut kexdhdone)) => {
+                    if kexdhdone.names.ignore_guessed {
+                        kexdhdone.names.ignore_guessed = false;
+                        enc.rekey = Some(Kex::KexDhDone(kexdhdone));
+                        return Ok(self);
+                    } else if buf[0] == msg::KEX_ECDH_REPLY {
+                        // We've sent ECDH_INIT, waiting for ECDH_REPLY
+                        enc.rekey = Some(kexdhdone.server_key_check(true, client, buf).await?);
+                        self.common
+                            .cipher
+                            .write(&[msg::NEWKEYS], &mut self.common.write_buffer);
+                        self.flush()?;
+                        return Ok(self);
+                    } else {
+                        error!("Wrong packet received");
+                        return Err(Error::Inconsistent.into());
+                    }
+                }
+                Some(Kex::NewKeys(newkeys)) => {
+                    if buf[0] != msg::NEWKEYS {
+                        return Err(Error::Kex.into());
+                    }
+                    self.common.write_buffer.bytes = 0;
+                    enc.last_rekey = std::time::Instant::now();
+
+                    // Ok, NEWKEYS received, now encrypted.
+                    self.common.newkeys(newkeys);
+                    return Ok(self);
+                }
+                rek => enc.rekey = rek,
+            }
+        }
+
         // If we've successfully read a packet.
-        debug!("buf = {:?}", buf);
+        debug!("buf = {:?} bytes", buf.len());
+        trace!("buf = {:?}", buf);
         let mut is_authenticated = false;
         if let Some(ref mut enc) = self.common.encrypted {
             match enc.state {
-                EncryptedState::WaitingServiceRequest { ref mut accepted } => {
+                EncryptedState::WaitingServiceRequest {
+                    ref mut accepted, ..
+                } => {
                     debug!(
                         "waiting service request, {:?} {:?}",
                         buf[0],
@@ -86,6 +136,8 @@ impl super::Session {
                                     debug!("enc: {:?}", &enc.write[len..]);
                                     enc.state = EncryptedState::WaitingAuthRequest(auth_request)
                                 }
+                            } else {
+                                debug!("no auth method")
                             }
                         }
                     } else {
@@ -319,7 +371,11 @@ impl super::Session {
                 let mut r = buf.reader(1);
                 let channel_num = ChannelId(r.read_u32()?);
                 let req = r.read_string()?;
-                debug!("channel_request: {:?} {:?}", channel_num, std::str::from_utf8(req));
+                debug!(
+                    "channel_request: {:?} {:?}",
+                    channel_num,
+                    std::str::from_utf8(req)
+                );
                 let cl = client.take().unwrap();
                 let (c, s) = match req {
                     b"forwarded_tcpip" => {
@@ -410,7 +466,18 @@ impl super::Session {
         if let Some(ref mut enc) = self.common.encrypted {
             is_waiting = match enc.state {
                 EncryptedState::WaitingAuthRequest(_) => true,
-                EncryptedState::WaitingServiceRequest { accepted } => accepted,
+                EncryptedState::WaitingServiceRequest {
+                    accepted,
+                    ref mut sent,
+                } => {
+                    debug!("sending ssh-userauth service requset");
+                    if !*sent {
+                        let p = b"\x05\0\0\0\x0Cssh-userauth";
+                        self.common.cipher.write(p, &mut self.common.write_buffer);
+                        *sent = true
+                    }
+                    accepted
+                }
                 EncryptedState::InitCompression | EncryptedState::Authenticated => false,
             };
             debug!(
@@ -439,7 +506,7 @@ impl Encrypted {
                     self.write.extend_ssh_string(user.as_bytes());
                     self.write.extend_ssh_string(b"ssh-connection");
                     self.write.extend_ssh_string(b"password");
-                    self.write.push(0);
+                    self.write.push(1);
                     self.write.extend_ssh_string(password.as_bytes());
                     true
                 }

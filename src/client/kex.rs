@@ -16,6 +16,7 @@ impl KexInit {
         debug!("client parse {:?} {:?}", buf.len(), buf);
         let algo = if self.algo.is_none() {
             // read algorithms from packet.
+            debug!("extending {:?}", &self.exchange.server_kex_init[..]);
             self.exchange.server_kex_init.extend(buf);
             super::negotiation::Client::read_kex(buf, &config.preferred)?
         } else {

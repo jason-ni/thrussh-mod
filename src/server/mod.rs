@@ -23,7 +23,6 @@ use thrussh_keys::key;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::negotiation::Select;
 use crate::session::*;
 use crate::ssh_read::*;
 use crate::sshbuffer::*;
@@ -409,7 +408,10 @@ pub async fn run<H: Server + Send + 'static>(
     let addr = addr.to_socket_addrs().unwrap().next().unwrap();
     let socket = TcpListener::bind(&addr).await?;
     if config.maximum_packet_size > 65535 {
-        error!("Maximum packet size ({:?}) should not larger than a TCP packet (65535)", config.maximum_packet_size);
+        error!(
+            "Maximum packet size ({:?}) should not larger than a TCP packet (65535)",
+            config.maximum_packet_size
+        );
     }
     socket
         .try_for_each(move |socket| {
@@ -442,7 +444,7 @@ pub async fn run_stream<H: Handler, R>(
     config: Arc<Config>,
     mut stream: R,
     handler: H,
-) -> Result<(), anyhow::Error>
+) -> Result<H, anyhow::Error>
 where
     R: AsyncRead + AsyncWrite + Unpin,
 {
@@ -512,7 +514,7 @@ where
                 debug!("timeout");
                 break
             },
-            msg = session.receiver.recv() => {
+            msg = session.receiver.recv(), if !session.is_rekeying() => {
                 match msg {
                     Some((id, ChannelMsg::Data { data })) => {
                         session.data(id, data);
@@ -545,7 +547,6 @@ where
             }
         }
         session.flush()?;
-        debug!("writing {:?}", &session.common.write_buffer.buffer[..]);
         stream
             .write_all(&session.common.write_buffer.buffer)
             .await?;
@@ -559,7 +560,7 @@ where
     while cipher::read(&mut stream, &mut buffer, &session.common.cipher).await? != 0 {
         buffer.buffer.clear();
     }
-    Ok(())
+    Ok(handler.unwrap())
 }
 
 async fn read_ssh_id<R: AsyncRead + Unpin>(
@@ -606,74 +607,55 @@ async fn reply<H: Handler>(
     buf: &[u8],
 ) -> Result<Session, anyhow::Error> {
     // Handle key exchange/re-exchange.
-    debug!("kex = {:?}", session.common.kex);
-    match session.common.kex.take() {
-        Some(Kex::KexInit(kexinit)) => {
-            if kexinit.algo.is_some()
-                || buf[0] == msg::KEXINIT
-                || session.common.encrypted.is_none()
-            {
-                session.common.kex = Some(kexinit.server_parse(
+    if session.common.encrypted.is_none() {
+        match session.common.kex.take() {
+            Some(Kex::KexInit(kexinit)) => {
+                if kexinit.algo.is_some() || buf[0] == msg::KEXINIT {
+                    session.common.kex = Some(kexinit.server_parse(
+                        session.common.config.as_ref(),
+                        &session.common.cipher,
+                        &buf,
+                        &mut session.common.write_buffer,
+                    )?);
+                    return Ok(session);
+                } else {
+                    // Else, i.e. if the other side has not started
+                    // the key exchange, process its packets by simple
+                    // not returning.
+                    session.common.kex = Some(Kex::KexInit(kexinit))
+                }
+            }
+            Some(Kex::KexDh(kexdh)) => {
+                session.common.kex = Some(kexdh.parse(
                     session.common.config.as_ref(),
                     &session.common.cipher,
-                    &buf,
+                    buf,
                     &mut session.common.write_buffer,
                 )?);
                 return Ok(session);
             }
-            // Else, i.e. if the other side has not started
-            // the key exchange, process its packets by simple
-            // not returning.
-        }
-        Some(Kex::KexDh(kexdh)) => {
-            session.common.kex = Some(kexdh.parse(
-                session.common.config.as_ref(),
-                &session.common.cipher,
-                buf,
-                &mut session.common.write_buffer,
-            )?);
-            return Ok(session);
-        }
-        Some(Kex::NewKeys(newkeys)) => {
-            if buf[0] != msg::NEWKEYS {
-                return Err(Error::Kex.into());
-            }
-            // Ok, NEWKEYS received, now encrypted.
-            session.common.encrypted(
-                EncryptedState::WaitingServiceRequest { accepted: false },
-                newkeys,
-            );
-            return Ok(session);
-        }
-        Some(kex) => {
-            session.common.kex = Some(kex);
-            return Ok(session);
-        }
-        None => {}
-    }
-
-    // Start a key re-exchange, if the client is asking for it.
-    if buf[0] == msg::KEXINIT {
-        // Now, if we're encrypted:
-        if let Some(ref mut enc) = session.common.encrypted {
-            // If we're not currently rekeying, but buf is a rekey request
-            if let Some(exchange) = enc.exchange.take() {
-                let pref = &session.common.config.as_ref().preferred;
-                let kexinit = KexInit::received_rekey(
-                    exchange,
-                    negotiation::Server::read_kex(buf, pref)?,
-                    &enc.session_id,
+            Some(Kex::NewKeys(newkeys)) => {
+                if buf[0] != msg::NEWKEYS {
+                    return Err(Error::Kex.into());
+                }
+                // Ok, NEWKEYS received, now encrypted.
+                session.common.encrypted(
+                    EncryptedState::WaitingServiceRequest {
+                        sent: false,
+                        accepted: false,
+                    },
+                    newkeys,
                 );
-                session.common.kex = Some(kexinit.server_parse(
-                    session.common.config.as_ref(),
-                    &mut session.common.cipher,
-                    buf,
-                    &mut session.common.write_buffer,
-                )?);
+                return Ok(session);
             }
+            Some(kex) => {
+                session.common.kex = Some(kex);
+                return Ok(session);
+            }
+            None => {}
         }
-        return Ok(session);
+        Ok(session)
+    } else {
+        Ok(session.server_read_encrypted(handler, buf).await?)
     }
-    // No kex going on, and the version id is done.
-    Ok(session.server_read_encrypted(handler, buf).await?)
 }
