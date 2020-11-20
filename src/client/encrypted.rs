@@ -24,6 +24,7 @@ use crate::{ChannelId, ChannelOpenFailure, Error, Sig};
 use cryptovec::CryptoVec;
 use std::cell::RefCell;
 use thrussh_keys::encoding::{Encoding, Reader};
+use tokio::sync::mpsc::{Sender, unbounded_channel};
 
 thread_local! {
     static SIGNATURE_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -454,10 +455,124 @@ impl super::Session {
                 *client = Some(c);
                 Ok(s)
             }
+            msg::CHANNEL_OPEN => {
+                self.client_handle_channel_open(client, buf).await
+            }
             _ => {
                 info!("Unhandled packet: {:?}", buf);
                 Ok(self)
             }
+        }
+    }
+
+    pub(crate) fn create_forwarded_tcpip_channel(
+        &mut self,
+        remote_channel: u32,
+        sender: Sender<Msg>,
+        window_size: u32,
+        max_packet_size: u32,
+    ) -> Result<super::Channel, anyhow::Error> {
+        if let Some(ref mut enc) = self.common.encrypted {
+            let forwarded_channel_id = enc.new_channel_id();
+            let (open_msg_sender, open_msg_receiver) = unbounded_channel();
+            self.channels.insert(forwarded_channel_id, open_msg_sender);
+            debug!("=== channel inserted: {}", forwarded_channel_id.0);
+            let ch = super::Channel{
+                sender: super::ChannelSender{
+                    sender,
+                    id: forwarded_channel_id,
+                },
+                receiver: open_msg_receiver,
+                window_size,
+                max_packet_size,
+            };
+            let enc_ch = crate::Channel{
+                recipient_channel: remote_channel,
+                sender_channel: forwarded_channel_id,
+                recipient_window_size: window_size,
+                sender_window_size: self.common.config.window_size,
+                recipient_maximum_packet_size: max_packet_size,
+                sender_maximum_packet_size: self.common.config.maximum_packet_size,
+                /// Has the other side confirmed the channel?
+                confirmed: true,
+                wants_reply: false,
+                pending_data: std::collections::VecDeque::new(),
+            };
+            enc.channels.insert(forwarded_channel_id, enc_ch);
+            self.confirm_channel_open(remote_channel, forwarded_channel_id.0);
+            Ok(ch)
+        } else {
+            Err(Error::Inconsistent.into())
+        }
+    }
+
+    async fn client_handle_channel_open<C: super::Handler>(
+        mut self,
+        client: &mut Option<C>,
+        buf: &[u8],
+    ) -> Result<Self, anyhow::Error> {
+        debug!("client handling channel open");
+        // https://tools.ietf.org/html/rfc4254#section-5.1
+        let mut r = buf.reader(1);
+        let typ = r.read_string()?;
+        let sender_channel = r.read_u32()?;
+        let window = r.read_u32()?;
+        let maxpacket = r.read_u32()?;
+        debug!("server request open channel:");
+        debug!("--- sender: {}", sender_channel);
+        debug!("--- type: {}", String::from_utf8_lossy(typ));
+        debug!("--- window: {}", window);
+        debug!("--- maxpacket: {}", maxpacket);
+        match typ {
+            b"forwarded-tcpip" => {
+                let address = r.read_string()?;
+                debug!("-- connect addr: {}", String::from_utf8_lossy(address));
+                let port = r.read_u32()?;
+                debug!("-- connect port: {}", port);
+                let orig_addr = r.read_string()?;
+                debug!("-- origin addr: {}", String::from_utf8_lossy(orig_addr));
+                let orig_port = r.read_u32()?;
+                debug!("-- origin port: {}", orig_port);
+                //self.confirm_channel_open(sender, local_channel.0);
+                let cl = client.take().unwrap();
+                let (c, m) = cl.channel_open_forwarded_tcpip_client(
+                    ChannelId(sender_channel),
+                    String::from_utf8_lossy(address).as_ref(),
+                    port,
+                    String::from_utf8_lossy(orig_addr).as_ref(),
+                    orig_port,
+                    window,
+                    maxpacket,
+                    self,
+                ).await?;
+                *client = Some(c);
+                Ok(m)
+            }
+            t => {
+                debug!("unknown channel type: {:?}", t);
+                if let Some(ref mut enc) = self.common.encrypted {
+                    push_packet!(enc.write, {
+                        enc.write.push(msg::CHANNEL_OPEN_FAILURE);
+                        enc.write.push_u32_be(sender_channel);
+                        enc.write.push_u32_be(3); // SSH_OPEN_UNKNOWN_CHANNEL_TYPE
+                        enc.write.extend_ssh_string(b"Unknown channel type");
+                        enc.write.extend_ssh_string(b"en");
+                    });
+                }
+                Ok(self)
+            }
+        }
+    }
+
+    pub fn confirm_channel_open(&mut self, remote_channel_no: u32, local_channel_no: u32) {
+        if let Some(ref mut enc) = self.common.encrypted {
+            debug!("=== enc channels: {:#?}", enc.channels);
+            client_confirm_channel_open(
+                &mut enc.write,
+                remote_channel_no,
+                local_channel_no,
+                self.common.config.as_ref(),
+            );
         }
     }
 
@@ -574,4 +689,18 @@ impl Encrypted {
         }
         Ok(())
     }
+}
+
+fn client_confirm_channel_open(
+    buffer: &mut CryptoVec,
+    remote_channel_no: u32,
+    local_channel_no: u32,
+    config: &super::Config) {
+    push_packet!(buffer, {
+        buffer.push(msg::CHANNEL_OPEN_CONFIRMATION);
+        buffer.push_u32_be(remote_channel_no); // remote channel number.
+        buffer.push_u32_be(local_channel_no); // our channel number.
+        buffer.push_u32_be(config.window_size);
+        buffer.push_u32_be(config.maximum_packet_size);
+    });
 }

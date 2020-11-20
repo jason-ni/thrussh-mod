@@ -42,6 +42,8 @@ mod session;
 
 use tokio::sync::mpsc::*;
 pub mod proxy;
+pub mod tunnel;
+
 pub struct Session {
     common: CommonSession<Arc<Config>>,
     receiver: Receiver<Msg>,
@@ -68,7 +70,7 @@ enum Reply {
 }
 
 #[derive(Debug)]
-enum Msg {
+pub enum Msg {
     Authenticate {
         user: String,
         method: auth::Method,
@@ -170,7 +172,7 @@ enum Msg {
 }
 
 #[derive(Debug)]
-enum OpenChannelMsg {
+pub enum OpenChannelMsg {
     Open {
         id: ChannelId,
         max_packet_size: u32,
@@ -793,10 +795,11 @@ where
         channels: HashMap::new(),
     };
     session.read_ssh_id(sshid)?;
+    let (c, s) = handler.on_session_connected(sender.clone(), session).await?;
     Ok(Handle {
         sender,
         receiver: receiver2,
-        join: tokio::spawn(session.run(stream, handler)),
+        join: tokio::spawn(s.run(stream, c)),
     })
 }
 
@@ -1177,6 +1180,11 @@ pub trait Handler: Sized {
     /// default handlers.
     fn finished(self, session: Session) -> Self::FutureUnit;
 
+    #[allow(unused_variables)]
+    fn on_session_connected(self, sender: Sender<Msg>, session: Session) -> Self::FutureUnit {
+        self.finished(session)
+    }
+
     /// Called when the server sends us an authentication banner. This
     /// is usually meant to be shown to the user, see
     /// [RFC4252](https://tools.ietf.org/html/rfc4252#section-5.4) for
@@ -1272,6 +1280,22 @@ pub trait Handler: Sized {
         connected_port: u32,
         originator_address: &str,
         originator_port: u32,
+        session: Session,
+    ) -> Self::FutureUnit {
+        self.finished(session)
+    }
+
+    /// Called when a new channel is created.
+    #[allow(unused_variables)]
+    fn channel_open_forwarded_tcpip_client(
+        self,
+        channel: ChannelId,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        window_size: u32,
+        max_packet_size: u32,
         session: Session,
     ) -> Self::FutureUnit {
         self.finished(session)
