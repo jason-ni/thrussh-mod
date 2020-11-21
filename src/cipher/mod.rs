@@ -122,6 +122,7 @@ pub async fn read<'a, R: AsyncRead + Unpin>(
         buffer.buffer.resize(len + 4);
     }
     stream.read_exact(&mut buffer.buffer[4..]).await?;
+    trace!("received encrypted bytes: {}", pretty_hex::pretty_hex(&buffer.buffer[..].as_ref()));
     let key = pair.remote_to_local.as_opening_key();
     let seqn = buffer.seqn.0;
     let ciphertext_len = buffer.buffer.len() - key.tag_len();
@@ -153,6 +154,7 @@ impl CipherPair {
         // The variables `payload`, `packet_length` and `padding_length` refer
         // to the protocol fields of the same names.
 
+        trace!("CipherPair writing into buffer: {}", pretty_hex::pretty_hex(&payload.as_ref()));
         let key = self.local_to_remote.as_sealing_key();
 
         let padding_length = key.padding_length(payload);

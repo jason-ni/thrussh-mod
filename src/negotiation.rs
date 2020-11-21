@@ -227,7 +227,7 @@ pub fn write_kex(prefs: &Preferred, buf: &mut CryptoVec) -> Result<(), anyhow::E
 
     let mut cookie = [0; 16];
     rand::rand_bytes(&mut cookie)?;
-
+    trace!("key exchange cookie:{}", pretty_hex::pretty_hex(&cookie));
     buf.extend(&cookie); // cookie
     buf.extend_list(prefs.kex.iter()); // kex algo
 
@@ -246,5 +246,6 @@ pub fn write_kex(prefs: &Preferred, buf: &mut CryptoVec) -> Result<(), anyhow::E
 
     buf.push(0); // doesn't follow
     buf.extend(&[0, 0, 0, 0]); // reserved
+    trace!("key exchange buf: {}", pretty_hex::pretty_hex(&buf.as_ref()));
     Ok(())
 }

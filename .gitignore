@@ -2,3 +2,4 @@ target
 id_rsa
 .idea
 Cargo.lock
+*.log

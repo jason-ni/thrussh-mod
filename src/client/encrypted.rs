@@ -36,9 +36,9 @@ impl super::Session {
         client: &mut Option<C>,
         buf: &[u8],
     ) -> Result<Self, anyhow::Error> {
-        debug!(
-            "client_read_encrypted, buf = {:?}",
-            &buf[..buf.len().min(100)]
+        trace!(
+            "client_read_encrypted, buf = {}",
+            pretty_hex::pretty_hex(&buf[..buf.len().min(100)].as_ref()),
         );
         // Either this packet is a KEXINIT, in which case we start a key re-exchange.
         if buf[0] == msg::KEXINIT {
@@ -59,6 +59,7 @@ impl super::Session {
                         negotiation::Client::read_kex(buf, &self.common.config.as_ref().preferred)?,
                         &enc.session_id,
                     );
+                    debug!("should we send a KexInit?");
                     enc.rekey = Some(Kex::KexDhDone(kexinit.client_parse(
                         self.common.config.as_ref(),
                         &mut self.common.cipher,

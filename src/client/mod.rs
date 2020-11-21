@@ -763,6 +763,7 @@ where
     // Writing SSH id.
     let mut write_buffer = SSHBuffer::new();
     write_buffer.send_ssh_id(config.as_ref().client_id.as_bytes());
+    trace!("send ssh id: {}", pretty_hex::pretty_hex(&write_buffer.buffer.as_ref()));
     stream.write_all(&write_buffer.buffer).await?;
 
     // Reading SSH id and allocating a session if correct.
@@ -803,15 +804,19 @@ where
     })
 }
 
+use pretty_hex::*;
 impl Session {
     async fn run<H: Handler + Send, R: AsyncRead + AsyncWrite + Unpin + Send>(
         mut self,
         mut stream: R,
         handler: H,
     ) -> Result<(), anyhow::Error> {
+        debug!("common.encrypt: {:?}", self.common.encrypted);
         self.flush()?;
         if !self.common.write_buffer.buffer.is_empty() {
+            // sending the initial key exchange initial request
             debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
+            trace!("writing data:\n{}", pretty_hex(&self.common.write_buffer.buffer));
             stream.write_all(&self.common.write_buffer.buffer).await?;
             stream.flush().await?;
         }
@@ -840,6 +845,7 @@ impl Session {
                     if buf.is_empty() {
                         continue
                     }
+                    trace!("decompressed buffer: {}", pretty_hex::pretty_hex(&buf));
                     if buf[0] == crate::msg::DISCONNECT {
                         break;
                     } else if buf[0] <= 4 {
@@ -911,6 +917,9 @@ impl Session {
             self.flush()?;
             debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
             if !self.common.write_buffer.buffer.is_empty() {
+                trace!(
+                    "writing to server data: {}",
+                    pretty_hex::pretty_hex(&self.common.write_buffer.buffer));
                 stream.write_all(&self.common.write_buffer.buffer).await?;
                 stream.flush().await?;
             }
@@ -1062,6 +1071,13 @@ async fn reply<H: Handler>(
 ) -> Result<Session, anyhow::Error> {
     match session.common.kex.take() {
         Some(Kex::KexInit(kexinit)) => {
+            debug!("handling replay in KeyInit state");
+            debug!(
+                "KeyInit: algo: {:?}, buf[0]: 0x{:x}, session.common.encrypted: {:?}",
+                kexinit.algo,
+                buf[0],
+                session.common.encrypted,
+            );
             if kexinit.algo.is_some()
                 || buf[0] == msg::KEXINIT
                 || session.common.encrypted.is_none()
@@ -1074,9 +1090,11 @@ async fn reply<H: Handler>(
                 )?));
                 session.flush()?;
             }
+            debug!("handle kex init done");
             Ok(session)
         }
         Some(Kex::KexDhDone(mut kexdhdone)) => {
+            debug!("handling replay in KeyDhDone state");
             if kexdhdone.names.ignore_guessed {
                 kexdhdone.names.ignore_guessed = false;
                 session.common.kex = Some(Kex::KexDhDone(kexdhdone));
@@ -1101,6 +1119,9 @@ async fn reply<H: Handler>(
                 return Err(Error::Kex.into());
             }
             let is_first_time = session.common.encrypted.is_none();
+            if let Some(ref enc) = session.common.encrypted {
+                debug!("on re exchange key, how do we handle old channels?");
+            }
             session.common.encrypted(
                 EncryptedState::WaitingServiceRequest {
                     accepted: false,
@@ -1120,6 +1141,7 @@ async fn reply<H: Handler>(
             Ok(session)
         }
         Some(kex) => {
+            debug!("handling KexDh: {:?}", &kex);
             session.common.kex = Some(kex);
             Ok(session)
         }

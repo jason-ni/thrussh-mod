@@ -112,7 +112,7 @@ impl<R: AsyncRead + Unpin> SshRead<R> {
             debug!("read {:?}", n);
 
             ssh_id.total += n;
-            debug!("{:?}", std::str::from_utf8(&ssh_id.buf[..ssh_id.total]));
+            trace!("received ssh id: {}", pretty_hex::pretty_hex(&ssh_id.buf[..ssh_id.total].as_ref()));
             if n == 0 {
                 return Err(Error::Disconnect.into());
             }

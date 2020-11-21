@@ -310,7 +310,15 @@ impl Encrypted {
         }
         let now = std::time::Instant::now();
         let dur = now.duration_since(self.last_rekey);
-        write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit
+        let condition = write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit;
+        debug!(
+            "whether need to rekey:\n  written bytes: {}, writer_limit: {}, dur: {:?}, time_limit: {:?}",
+            write_buffer.bytes,
+            limits.rekey_write_limit,
+            dur,
+            limits.rekey_time_limit,
+        );
+        condition
     }
     pub fn new_channel_id(&mut self) -> ChannelId {
         self.last_channel_id += Wrapping(1);
