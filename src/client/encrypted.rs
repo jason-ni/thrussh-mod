@@ -59,7 +59,7 @@ impl super::Session {
                         negotiation::Client::read_kex(buf, &self.common.config.as_ref().preferred)?,
                         &enc.session_id,
                     );
-                    debug!("should we send a KexInit?");
+                    debug!("shall we send a KexInit?");
                     enc.rekey = Some(Kex::KexDhDone(kexinit.client_parse(
                         self.common.config.as_ref(),
                         &mut self.common.cipher,
