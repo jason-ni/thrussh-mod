@@ -1,14 +1,14 @@
 use cryptovec::CryptoVec;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc::{Sender, UnboundedSender, UnboundedReceiver, unbounded_channel};
 use thrussh_keys::key;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
 
-use crate::client::{Channel, OpenChannelMsg, Msg, ChannelMsg, ChannelId, Handler, Session};
-use crate::Error;
-use tokio::net::tcp::OwnedWriteHalf;
-use tokio::io::AsyncWriteExt;
-use std::net::SocketAddr;
 use crate::client::proxy::Stream::Tcp;
+use crate::client::{Channel, ChannelId, ChannelMsg, Handler, Msg, OpenChannelMsg, Session};
+use crate::Error;
+use std::net::SocketAddr;
+use tokio::io::AsyncWriteExt;
+use tokio::net::tcp::OwnedWriteHalf;
 
 pub struct RemoteTunnel {
     addr: SocketAddr,
@@ -21,7 +21,7 @@ pub struct RemoteTunnel {
 
 impl RemoteTunnel {
     pub fn new(addr: SocketAddr, ch: Channel) -> Self {
-        RemoteTunnel{
+        RemoteTunnel {
             addr,
             sender: ch.sender.sender,
             receiver: ch.receiver,
@@ -37,7 +37,11 @@ impl RemoteTunnel {
         let sender = self.sender.clone();
         let (sender_tcp, receiver_tcp) = unbounded_channel();
         let (sender_ssh, receiver_ssh) = unbounded_channel();
-        tokio::spawn(Self::receive_msg_loop(self.receiver, sender_tcp, sender_ssh));
+        tokio::spawn(Self::receive_msg_loop(
+            self.receiver,
+            sender_tcp,
+            sender_ssh,
+        ));
         tokio::spawn(Self::send_to_ssh_loop(
             sender.clone(),
             self.channel_id.clone(),
@@ -63,33 +67,36 @@ impl RemoteTunnel {
         loop {
             if let Some(msg) = msg_receiver.recv().await {
                 match msg {
-                    OpenChannelMsg::Msg(ch_msg) => {
-                        match ch_msg {
-                            ChannelMsg::Data {data} => {
-                                sender_tcp.send(OpenChannelMsg::Msg(ChannelMsg::Data {data}))
-                                    .map_err(|_| Error::SendError)?;
-                            }
-                            ChannelMsg::Eof => {
-                                sender_tcp.send(OpenChannelMsg::Msg(ChannelMsg::Eof))
-                                    .map_err(|_| Error::SendError)?;
-                                sender_ssh.send(OpenChannelMsg::Msg(ChannelMsg::Eof))
-                                    .map_err(|_| Error::SendError)?;
-                            }
-                            ChannelMsg::WindowAdjusted {new_size} => {
-                                sender_ssh.send(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted {new_size}))
-                                    .map_err(|_| Error::SendError)?;
-                            }
-                            x => {
-                                panic!("unexpected ChannelMsg received: {:?}", x)
-                            }
+                    OpenChannelMsg::Msg(ch_msg) => match ch_msg {
+                        ChannelMsg::Data { data } => {
+                            sender_tcp
+                                .send(OpenChannelMsg::Msg(ChannelMsg::Data { data }))
+                                .map_err(|_| Error::SendError)?;
                         }
-                    }
-                    x=> {
-                        panic!("unexpected OpenChannelMsg received: {:?}", x)
-                    }
+                        ChannelMsg::Eof => {
+                            sender_tcp
+                                .send(OpenChannelMsg::Msg(ChannelMsg::Eof))
+                                .map_err(|_| Error::SendError)?;
+                            sender_ssh
+                                .send(OpenChannelMsg::Msg(ChannelMsg::Eof))
+                                .map_err(|_| Error::SendError)?;
+                        }
+                        ChannelMsg::WindowAdjusted { new_size } => {
+                            sender_ssh
+                                .send(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size }))
+                                .map_err(|_| Error::SendError)?;
+                        }
+                        ChannelMsg::FlushPendingAck { again } => {
+                            sender_ssh
+                                .send(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again }))
+                                .map_err(|_| Error::SendError)?;
+                        }
+                        x => panic!("unexpected ChannelMsg received: {:?}", x),
+                    },
+                    x => panic!("unexpected OpenChannelMsg received: {:?}", x),
                 }
             } else {
-                return Ok(())
+                return Ok(());
             }
         }
     }
@@ -104,22 +111,20 @@ impl RemoteTunnel {
         loop {
             if let Some(msg) = msg_receiver.recv().await {
                 match msg {
-                    OpenChannelMsg::Msg(ch_msg) => {
-                        match ch_msg {
-                            ChannelMsg::Data {data} => {
-                                writer.write_all(data.as_ref()).await?;
-                            }
-                            ChannelMsg::Eof => {
-                                debug!("ssh channel write part eof");
-                                break
-                            }
-                            x => panic!("unexpected ChannelMsg: {:?}", x)
+                    OpenChannelMsg::Msg(ch_msg) => match ch_msg {
+                        ChannelMsg::Data { data } => {
+                            writer.write_all(data.as_ref()).await?;
                         }
-                    }
-                    x => panic!("unexpected OpenChannelMsg: {:?}", x)
+                        ChannelMsg::Eof => {
+                            debug!("ssh channel write part eof");
+                            break;
+                        }
+                        x => panic!("unexpected ChannelMsg: {:?}", x),
+                    },
+                    x => panic!("unexpected OpenChannelMsg: {:?}", x),
                 }
             } else {
-                break
+                break;
             }
         }
         debug!("exiting send_to_tcp_loop");
@@ -156,26 +161,39 @@ impl RemoteTunnel {
                         .send(Msg::Eof { id: channel_id })
                         .await
                         .map_err(|_| Error::SendError)?;
-                    return Ok(())
+                    return Ok(());
                 }
-                sender.send(
-                    Msg::Data {
+                sender
+                    .send(Msg::Data {
                         id: channel_id,
                         data: c,
                     })
                     .await
                     .map_err(|_| Error::SendError)?;
                 if window_size > 0 {
-                    break
+                    break;
                 }
                 // wait for the window to be restored.
+                sender
+                    .send(Msg::FlushPending { id: channel_id })
+                    .await
+                    .map_err(|_| Error::SendError)?;
                 loop {
                     debug!("waiting on window size adjusting");
                     match receiver.recv().await {
-                        Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size})) => {
+                        Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
                             debug!("ignoring window_size adjust: {}", window_size);
                             window_size = new_size;
-                            break
+                        }
+                        Some(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again })) => {
+                            if again || (window_size == 0) {
+                                sender
+                                    .send(Msg::FlushPending { id: channel_id })
+                                    .await
+                                    .map_err(|_| Error::SendError)?;
+                            } else {
+                                break;
+                            }
                         }
                         Some(OpenChannelMsg::Msg(msg)) => {
                             panic!("unexpected channel msg: {:?}", msg);
@@ -195,9 +213,7 @@ pub struct TunnelClient {
 
 impl TunnelClient {
     pub fn new() -> Self {
-        TunnelClient{
-            sender: None,
-        }
+        TunnelClient { sender: None }
     }
 }
 
@@ -234,18 +250,20 @@ impl Handler for TunnelClient {
         debug!("client handling open forwarded tcpip request");
         match &self.sender {
             Some(ref sender) => {
-                let ch = session.create_forwarded_tcpip_channel(
-                    channel.0,
-                    sender.clone(), window_size, max_packet_size).unwrap();
-                let addr: SocketAddr = "192.168.0.111:80".parse().unwrap();
+                let ch = session
+                    .create_forwarded_tcpip_channel(
+                        channel.0,
+                        sender.clone(),
+                        window_size,
+                        max_packet_size,
+                    )
+                    .unwrap();
+                let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
                 let tunnel = RemoteTunnel::new(addr, ch);
                 tokio::spawn(tunnel.run());
             }
-            None => {
-                panic!("client should connect first")
-            }
+            None => panic!("client should connect first"),
         }
         self.finished(session)
     }
 }
-

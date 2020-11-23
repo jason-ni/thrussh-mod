@@ -540,6 +540,9 @@ where
                     Some((id, ChannelMsg::Success)) => {
                         debug!("channel success {:?}", id);
                     }
+                    Some((id, ChannelMsg::FlushPendingAck {again})) => {
+                        debug!("flush pending ack {:?}", id);
+                    }
                     None => {
                         debug!("session.receiver: received None");
                     }

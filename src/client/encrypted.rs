@@ -24,7 +24,7 @@ use crate::{ChannelId, ChannelOpenFailure, Error, Sig};
 use cryptovec::CryptoVec;
 use std::cell::RefCell;
 use thrussh_keys::encoding::{Encoding, Reader};
-use tokio::sync::mpsc::{Sender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, Sender};
 
 thread_local! {
     static SIGNATURE_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -456,9 +456,7 @@ impl super::Session {
                 *client = Some(c);
                 Ok(s)
             }
-            msg::CHANNEL_OPEN => {
-                self.client_handle_channel_open(client, buf).await
-            }
+            msg::CHANNEL_OPEN => self.client_handle_channel_open(client, buf).await,
             _ => {
                 info!("Unhandled packet: {:?}", buf);
                 Ok(self)
@@ -478,8 +476,8 @@ impl super::Session {
             let (open_msg_sender, open_msg_receiver) = unbounded_channel();
             self.channels.insert(forwarded_channel_id, open_msg_sender);
             debug!("=== channel inserted: {}", forwarded_channel_id.0);
-            let ch = super::Channel{
-                sender: super::ChannelSender{
+            let ch = super::Channel {
+                sender: super::ChannelSender {
                     sender,
                     id: forwarded_channel_id,
                 },
@@ -487,7 +485,7 @@ impl super::Session {
                 window_size,
                 max_packet_size,
             };
-            let enc_ch = crate::Channel{
+            let enc_ch = crate::Channel {
                 recipient_channel: remote_channel,
                 sender_channel: forwarded_channel_id,
                 recipient_window_size: window_size,
@@ -536,16 +534,18 @@ impl super::Session {
                 debug!("-- origin port: {}", orig_port);
                 //self.confirm_channel_open(sender, local_channel.0);
                 let cl = client.take().unwrap();
-                let (c, m) = cl.channel_open_forwarded_tcpip_client(
-                    ChannelId(sender_channel),
-                    String::from_utf8_lossy(address).as_ref(),
-                    port,
-                    String::from_utf8_lossy(orig_addr).as_ref(),
-                    orig_port,
-                    window,
-                    maxpacket,
-                    self,
-                ).await?;
+                let (c, m) = cl
+                    .channel_open_forwarded_tcpip_client(
+                        ChannelId(sender_channel),
+                        String::from_utf8_lossy(address).as_ref(),
+                        port,
+                        String::from_utf8_lossy(orig_addr).as_ref(),
+                        orig_port,
+                        window,
+                        maxpacket,
+                        self,
+                    )
+                    .await?;
                 *client = Some(c);
                 Ok(m)
             }
@@ -696,7 +696,8 @@ fn client_confirm_channel_open(
     buffer: &mut CryptoVec,
     remote_channel_no: u32,
     local_channel_no: u32,
-    config: &super::Config) {
+    config: &super::Config,
+) {
     push_packet!(buffer, {
         buffer.push(msg::CHANNEL_OPEN_CONFIRMATION);
         buffer.push_u32_be(remote_channel_no); // remote channel number.

@@ -267,6 +267,23 @@ impl Session {
         }
     }
 
+    pub fn flush_pending_channel(&mut self, channel_id: ChannelId) {
+        if let Some(ref mut enc) = self.common.encrypted {
+            enc.flush_pending(channel_id.clone());
+            if let Some(ch) = enc.channels.get(&channel_id) {
+                if let Some(session_ch) = self.channels.get(&channel_id) {
+                    let mut again = true;
+                    if ch.pending_data.len() == 0 {
+                        again = false;
+                    }
+                    session_ch
+                        .send(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again }))
+                        .map_err(|e| error!("failed to send FlushPendingAck: {:?}", e));
+                }
+            }
+        }
+    }
+
     pub fn window_change(
         &mut self,
         channel: ChannelId,

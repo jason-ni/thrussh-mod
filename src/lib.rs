@@ -610,6 +610,9 @@ pub enum ChannelMsg {
         new_size: u32,
     },
     Success,
+    FlushPendingAck {
+        again: bool,
+    },
 }
 
 #[cfg(test)]

@@ -13,34 +13,38 @@
 // limitations under the License.
 //
 
-use crate::auth;
-use crate::negotiation;
-use crate::pty::Pty;
-use crate::session::*;
-use crate::ssh_read::SshRead;
-use crate::sshbuffer::*;
-use crate::{ChannelId, ChannelMsg, ChannelOpenFailure, Disconnect, Limits, Sig};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::net::ToSocketAddrs;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use cryptovec::CryptoVec;
 use futures::task::{Context, Poll};
 use futures::Future;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Arc;
+use pretty_hex::*;
 use thrussh_keys::encoding::{Encoding, Reader};
 use thrussh_keys::key;
 use thrussh_keys::key::parse_public_key;
 use tokio;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::*;
 
-mod kex;
+use crate::auth;
 use crate::cipher;
+use crate::negotiation;
+use crate::pty::Pty;
+use crate::session::*;
+use crate::ssh_read::SshRead;
+use crate::sshbuffer::*;
 use crate::{msg, Error};
+use crate::{ChannelId, ChannelMsg, ChannelOpenFailure, Disconnect, Limits, Sig};
+
 mod encrypted;
+mod kex;
 mod session;
 
-use tokio::sync::mpsc::*;
 pub mod proxy;
 pub mod tunnel;
 
@@ -168,6 +172,9 @@ pub enum Msg {
         row_height: u32,
         pix_width: u32,
         pix_height: u32,
+    },
+    FlushPending {
+        id: ChannelId,
     },
 }
 
@@ -740,7 +747,6 @@ impl Future for Handle {
     }
 }
 
-use std::net::ToSocketAddrs;
 pub async fn connect<H: Handler + Send + 'static, T: ToSocketAddrs>(
     config: Arc<Config>,
     addr: T,
@@ -763,7 +769,10 @@ where
     // Writing SSH id.
     let mut write_buffer = SSHBuffer::new();
     write_buffer.send_ssh_id(config.as_ref().client_id.as_bytes());
-    trace!("send ssh id: {}", pretty_hex::pretty_hex(&write_buffer.buffer.as_ref()));
+    trace!(
+        "send ssh id: {}",
+        pretty_hex::pretty_hex(&write_buffer.buffer.as_ref())
+    );
     stream.write_all(&write_buffer.buffer).await?;
 
     // Reading SSH id and allocating a session if correct.
@@ -796,7 +805,9 @@ where
         channels: HashMap::new(),
     };
     session.read_ssh_id(sshid)?;
-    let (c, s) = handler.on_session_connected(sender.clone(), session).await?;
+    let (c, s) = handler
+        .on_session_connected(sender.clone(), session)
+        .await?;
     Ok(Handle {
         sender,
         receiver: receiver2,
@@ -804,7 +815,6 @@ where
     })
 }
 
-use pretty_hex::*;
 impl Session {
     async fn run<H: Handler + Send, R: AsyncRead + AsyncWrite + Unpin + Send>(
         mut self,
@@ -816,7 +826,10 @@ impl Session {
         if !self.common.write_buffer.buffer.is_empty() {
             // sending the initial key exchange initial request
             debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
-            trace!("writing data:\n{}", pretty_hex(&self.common.write_buffer.buffer));
+            trace!(
+                "writing data:\n{}",
+                pretty_hex(&self.common.write_buffer.buffer)
+            );
             stream.write_all(&self.common.write_buffer.buffer).await?;
             stream.flush().await?;
         }
@@ -907,6 +920,9 @@ impl Session {
                         Some(Msg::RequestSubsystem { id, want_reply, name }) => {
                             self.request_subsystem(want_reply, id, &name)
                         },
+                        Some(Msg::FlushPending {id}) => {
+                            self.flush_pending_channel(id)
+                        },
                         None => {
                             self.common.disconnected = true;
                             break
@@ -916,10 +932,16 @@ impl Session {
             }
             self.flush()?;
             debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
+            if let Some(ref enc) = self.common.encrypted {
+                for (chid, ch) in enc.channels.iter() {
+                    debug!("channel({:?}) pending: {}", chid, ch.pending_data.len());
+                }
+            }
             if !self.common.write_buffer.buffer.is_empty() {
                 trace!(
                     "writing to server data: {}",
-                    pretty_hex::pretty_hex(&self.common.write_buffer.buffer));
+                    pretty_hex::pretty_hex(&self.common.write_buffer.buffer)
+                );
                 stream.write_all(&self.common.write_buffer.buffer).await?;
                 stream.flush().await?;
             }
@@ -1004,6 +1026,17 @@ impl Session {
         }
         Ok(())
     }
+
+    fn flush_without_rekey(&mut self) -> Result<(), anyhow::Error> {
+        if let Some(ref mut enc) = self.common.encrypted {
+            enc.flush(
+                &self.common.config.as_ref().limits,
+                &mut self.common.cipher,
+                &mut self.common.write_buffer,
+            );
+        }
+        Ok(())
+    }
 }
 thread_local! {
     static HASH_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -1074,9 +1107,7 @@ async fn reply<H: Handler>(
             debug!("handling replay in KeyInit state");
             debug!(
                 "KeyInit: algo: {:?}, buf[0]: 0x{:x}, session.common.encrypted: {:?}",
-                kexinit.algo,
-                buf[0],
-                session.common.encrypted,
+                kexinit.algo, buf[0], session.common.encrypted,
             );
             if kexinit.algo.is_some()
                 || buf[0] == msg::KEXINIT
