@@ -29,6 +29,7 @@ use thrussh_keys::key::parse_public_key;
 use tokio;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::pin;
 use tokio::sync::mpsc::*;
 
 use crate::auth;
@@ -647,26 +648,10 @@ impl Channel {
     ) -> Result<(), anyhow::Error> {
         let mut total = 0;
         loop {
-            debug!(
-                "sending data, self.window_size = {:?}, self.max_packet_size = {:?}, total = {:?}",
-                self.window_size, self.max_packet_size, total
-            );
-            let sendable = self.window_size.min(self.max_packet_size) as usize;
-            let mut c = CryptoVec::new_zeroed(sendable);
-            let n = data.read(&mut c[..]).await?;
-            total += n;
-            c.resize(n);
-            self.window_size -= n as u32;
-            self.send_data_packet(ext, c).await?;
-            if sendable > 0 && n == 0 {
-                break;
-            } else if self.window_size > 0 {
-                continue;
-            }
-            // wait for the window to be restored.
-            loop {
+            while self.window_size == 0 {
                 match self.receiver.recv().await {
                     Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
+                        debug!("window adjusted: {:?}", new_size);
                         self.window_size = new_size;
                         break;
                     }
@@ -676,6 +661,23 @@ impl Channel {
                     Some(_) => debug!("unexpected channel msg"),
                     None => break,
                 }
+            }
+            debug!(
+                "sending data, self.window_size = {:?}, self.max_packet_size = {:?}, total = {:?}",
+                self.window_size, self.max_packet_size, total
+            );
+            let sendable = self.window_size.min(self.max_packet_size) as usize;
+            debug!("sendable {:?}", sendable);
+            let mut c = CryptoVec::new_zeroed(sendable);
+            let n = data.read(&mut c[..]).await?;
+            total += n;
+            c.resize(n);
+            self.window_size -= n as u32;
+            self.send_data_packet(ext, c).await?;
+            if n == 0 {
+                break;
+            } else if self.window_size > 0 {
+                continue;
             }
         }
         Ok(())
@@ -805,21 +807,35 @@ where
         channels: HashMap::new(),
     };
     session.read_ssh_id(sshid)?;
+    let (encrypted_signal, encrypted_recv) = tokio::sync::oneshot::channel();
     let (c, s) = handler
         .on_session_connected(sender.clone(), session)
         .await?;
+    let join = tokio::spawn(s.run(stream, c, Some(encrypted_signal)));
+    encrypted_recv.await.unwrap_or(());
     Ok(Handle {
         sender,
         receiver: receiver2,
-        join: tokio::spawn(s.run(stream, c)),
+        join,
     })
+}
+
+async fn start_reading<R: AsyncRead + Unpin>(
+    mut stream_read: R,
+    mut buffer: SSHBuffer,
+    cipher: Arc<crate::cipher::CipherPair>,
+) -> Result<(usize, R, SSHBuffer), anyhow::Error> {
+    buffer.buffer.clear();
+    let n = cipher::read(&mut stream_read, &mut buffer, &cipher).await?;
+    Ok((n, stream_read, buffer))
 }
 
 impl Session {
     async fn run<H: Handler + Send, R: AsyncRead + AsyncWrite + Unpin + Send>(
         mut self,
-        mut stream: R,
+        mut stream: SshRead<R>,
         handler: H,
+        mut encrypted_signal: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<(), anyhow::Error> {
         debug!("common.encrypt: {:?}", self.common.encrypted);
         self.flush()?;
@@ -834,13 +850,18 @@ impl Session {
             stream.flush().await?;
         }
         self.common.write_buffer.buffer.clear();
-        let mut buffer = SSHBuffer::new();
         let mut decomp = CryptoVec::new();
         let mut handler = Some(handler);
+
+        let (stream_read, mut stream_write) = stream.split();
+        let buffer = SSHBuffer::new();
+        let reading = start_reading(stream_read, buffer, self.common.cipher.clone());
+        pin!(reading);
+
         while !self.common.disconnected {
             tokio::select! {
-                n = cipher::read(&mut stream, &mut buffer, &self.common.cipher) => {
-                    if n.is_err() || buffer.buffer.len() < 5 {
+                Ok((_, stream_read, buffer)) = &mut reading => {
+                    if buffer.buffer.len() < 5 {
                         break
                     }
                     let buf = if let Some(ref mut enc) = self.common.encrypted {
@@ -864,7 +885,8 @@ impl Session {
                     } else if buf[0] <= 4 {
                         continue;
                     }
-                    self = reply(self, &mut handler, &buf[..]).await?;
+                    self = reply(self, &mut handler, &mut encrypted_signal, &buf[..]).await?;
+                    reading.set(start_reading(stream_read, buffer, self.common.cipher.clone()));
                 }
                 msg = self.receiver.recv(), if !self.is_rekeying() => {
                     match msg {
@@ -931,7 +953,6 @@ impl Session {
                 }
             }
             self.flush()?;
-            debug!("writing {:?} bytes", self.common.write_buffer.buffer.len());
             if let Some(ref enc) = self.common.encrypted {
                 for (chid, ch) in enc.channels.iter() {
                     debug!("channel({:?}) pending: {}", chid, ch.pending_data.len());
@@ -942,10 +963,15 @@ impl Session {
                     "writing to server data: {}",
                     pretty_hex::pretty_hex(&self.common.write_buffer.buffer)
                 );
-                stream.write_all(&self.common.write_buffer.buffer).await?;
-                stream.flush().await?;
+                debug!(
+                    "writing to stream: {:?} bytes",
+                    self.common.write_buffer.buffer.len()
+                );
+                stream_write
+                    .write_all(&self.common.write_buffer.buffer)
+                    .await?;
+                stream_write.flush().await?;
             }
-            buffer.buffer.clear();
             self.common.write_buffer.buffer.clear();
             if let Some(ref mut enc) = self.common.encrypted {
                 if let EncryptedState::InitCompression = enc.state {
@@ -956,13 +982,7 @@ impl Session {
         }
         debug!("disconnected");
         if self.common.disconnected {
-            stream.shutdown().await?;
-
-            // Shutdown
-            buffer.buffer.clear();
-            while cipher::read(&mut stream, &mut buffer, &self.common.cipher).await? != 0 {
-                buffer.buffer.clear();
-            }
+            stream_write.shutdown().await?;
         }
         Ok(())
     }
@@ -1100,6 +1120,7 @@ impl KexDhDone {
 async fn reply<H: Handler>(
     mut session: Session,
     handler: &mut Option<H>,
+    sender: &mut Option<tokio::sync::oneshot::Sender<()>>,
     buf: &[u8],
 ) -> Result<Session, anyhow::Error> {
     match session.common.kex.take() {
@@ -1149,25 +1170,16 @@ async fn reply<H: Handler>(
             if buf[0] != msg::NEWKEYS {
                 return Err(Error::Kex.into());
             }
-            let is_first_time = session.common.encrypted.is_none();
-            if let Some(ref enc) = session.common.encrypted {
-                debug!("on re exchange key, how do we handle old channels?");
+            if let Some(sender) = sender.take() {
+                sender.send(()).unwrap_or(());
             }
             session.common.encrypted(
                 EncryptedState::WaitingServiceRequest {
                     accepted: false,
-                    sent: is_first_time,
+                    sent: false,
                 },
                 newkeys,
             );
-            if is_first_time {
-                debug!("sending ssh-userauth service requset");
-                let p = b"\x05\0\0\0\x0Cssh-userauth";
-                session
-                    .common
-                    .cipher
-                    .write(p, &mut session.common.write_buffer);
-            }
             // Ok, NEWKEYS received, now encrypted.
             Ok(session)
         }

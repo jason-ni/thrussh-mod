@@ -22,6 +22,7 @@ use futures::stream::TryStreamExt;
 use thrussh_keys::key;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::pin;
 
 use crate::session::*;
 use crate::ssh_read::*;
@@ -440,6 +441,16 @@ pub async fn timeout(delay: Option<std::time::Duration>) {
     };
 }
 
+async fn start_reading<R: AsyncRead + Unpin>(
+    mut stream_read: R,
+    mut buffer: SSHBuffer,
+    cipher: Arc<crate::cipher::CipherPair>,
+) -> Result<(usize, R, SSHBuffer), anyhow::Error> {
+    buffer.buffer.clear();
+    let n = cipher::read(&mut stream_read, &mut buffer, &cipher).await?;
+    Ok((n, stream_read, buffer))
+}
+
 pub async fn run_stream<H: Handler, R>(
     config: Arc<Config>,
     mut stream: R,
@@ -471,11 +482,15 @@ where
         .write_all(&session.common.write_buffer.buffer)
         .await?;
     session.common.write_buffer.buffer.clear();
-    let mut buffer = SSHBuffer::new();
+
+    let (stream_read, mut stream_write) = stream.split();
+    let buffer = SSHBuffer::new();
+    let reading = start_reading(stream_read, buffer, session.common.cipher.clone());
+    pin!(reading);
 
     while !session.common.disconnected {
         tokio::select! {
-            _ = cipher::read(&mut stream, &mut buffer, &session.common.cipher) => {
+            Ok((_, stream_read, buffer)) = &mut reading => {
                 if buffer.buffer.len() < 5 {
                     break
                 }
@@ -509,6 +524,7 @@ where
                         return Err(e)
                     }
                 }
+                reading.set(start_reading(stream_read, buffer, session.common.cipher.clone()));
             }
             _ = timeout(delay) => {
                 debug!("timeout");
@@ -550,18 +566,21 @@ where
             }
         }
         session.flush()?;
-        stream
+        stream_write
             .write_all(&session.common.write_buffer.buffer)
             .await?;
-        buffer.buffer.clear();
         session.common.write_buffer.buffer.clear();
     }
     debug!("disconnected");
     // Shutdown
-    stream.shutdown().await?;
-    buffer.buffer.clear();
-    while cipher::read(&mut stream, &mut buffer, &session.common.cipher).await? != 0 {
-        buffer.buffer.clear();
+    stream_write.shutdown().await?;
+    loop {
+        let (n, r, b) = (&mut reading).await?;
+        if n == 0 {
+            break;
+        } else {
+            reading.set(start_reading(r, b, session.common.cipher.clone()))
+        }
     }
     Ok(handler.unwrap())
 }

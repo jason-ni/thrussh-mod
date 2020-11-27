@@ -42,7 +42,14 @@ impl std::fmt::Debug for ReadSshIdBuffer {
 /// connection, the `id` parameter is never used again.
 pub struct SshRead<R> {
     id: Option<ReadSshIdBuffer>,
-    r: R,
+    pub r: R,
+}
+
+impl<R: AsyncRead + AsyncWrite> SshRead<R> {
+    pub fn split(self) -> (SshRead<tokio::io::ReadHalf<R>>, tokio::io::WriteHalf<R>) {
+        let (r, w) = tokio::io::split(self.r);
+        (SshRead { id: self.id, r }, w)
+    }
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for SshRead<R> {
@@ -112,7 +119,10 @@ impl<R: AsyncRead + Unpin> SshRead<R> {
             debug!("read {:?}", n);
 
             ssh_id.total += n;
-            trace!("received ssh id: {}", pretty_hex::pretty_hex(&ssh_id.buf[..ssh_id.total].as_ref()));
+            trace!(
+                "received ssh id: {}",
+                pretty_hex::pretty_hex(&ssh_id.buf[..ssh_id.total].as_ref())
+            );
             if n == 0 {
                 return Err(Error::Disconnect.into());
             }
