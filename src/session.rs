@@ -209,8 +209,8 @@ impl Encrypted {
         from: usize,
     ) -> (CryptoVec, usize) {
         use std::ops::Deref;
-        let mut buf = if buf0.len() as u32 > channel.recipient_window_size {
-            &buf0[from..channel.recipient_window_size as usize]
+        let mut buf = if buf0.len() > from + channel.recipient_window_size as usize {
+            &buf0[from..(from + channel.recipient_window_size as usize)]
         } else {
             &buf0[from..]
         };
@@ -310,7 +310,8 @@ impl Encrypted {
         }
         let now = std::time::Instant::now();
         let dur = now.duration_since(self.last_rekey);
-        let condition = write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit;
+        let condition =
+            write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit;
         debug!(
             "whether need to rekey:\n  written bytes: {}, writer_limit: {}, dur: {:?}, time_limit: {:?}",
             write_buffer.bytes,

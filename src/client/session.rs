@@ -269,7 +269,14 @@ impl Session {
 
     pub fn flush_pending_channel(&mut self, channel_id: ChannelId) {
         if let Some(ref mut enc) = self.common.encrypted {
-            enc.flush_pending(channel_id.clone());
+            let window_size = if let Some(ch) = enc.channels.get(&channel_id) {
+                ch.recipient_window_size
+            } else {
+                0
+            };
+            if window_size > 0 {
+                enc.flush_pending(channel_id.clone());
+            }
             if let Some(ch) = enc.channels.get(&channel_id) {
                 if let Some(session_ch) = self.channels.get(&channel_id) {
                     let mut again = true;
