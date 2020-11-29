@@ -158,6 +158,35 @@ impl RemoteTunnel {
                 if n == 0 {
                     debug!("=== read tcp socket end. window: {}", window_size);
                     sender
+                        .send(Msg::FlushPending { id: channel_id })
+                        .await
+                        .map_err(|_| Error::SendError)?;
+                    loop {
+                        debug!("waiting on window size adjusting");
+                        match receiver.recv().await {
+                            Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
+                                debug!("ignoring window_size adjust: {}", window_size);
+                                window_size = new_size;
+                            }
+                            Some(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again })) => {
+                                if again || (window_size == 0) {
+                                    sender
+                                        .send(Msg::FlushPending { id: channel_id })
+                                        .await
+                                        .map_err(|_| Error::SendError)?;
+                                } else {
+                                    break;
+                                }
+                            }
+                            Some(OpenChannelMsg::Msg(ChannelMsg::Eof)) => break,
+                            Some(OpenChannelMsg::Msg(msg)) => {
+                                panic!("unexpected channel msg: {:?}", msg);
+                            }
+                            Some(_) => panic!("unexpected channel msg"),
+                            None => break,
+                        }
+                    }
+                    sender
                         .send(Msg::Eof { id: channel_id })
                         .await
                         .map_err(|_| Error::SendError)?;
