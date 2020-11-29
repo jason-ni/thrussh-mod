@@ -229,7 +229,7 @@ impl Encrypted {
             buf = &buf[off..]
         }
         debug!("buf.len() = {:?}, buf_len = {:?}", buf.len(), buf_len);
-        (buf0, buf_len)
+        (buf0, from + buf_len)
     }
 
     pub fn data(&mut self, channel: ChannelId, buf0: CryptoVec) {
