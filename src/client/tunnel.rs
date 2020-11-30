@@ -186,6 +186,7 @@ impl RemoteTunnel {
                             None => break,
                         }
                     }
+
                     sender
                         .send(Msg::Eof { id: channel_id })
                         .await
@@ -207,6 +208,7 @@ impl RemoteTunnel {
                     .send(Msg::FlushPending { id: channel_id })
                     .await
                     .map_err(|_| Error::SendError)?;
+
                 loop {
                     debug!("waiting on window size adjusting");
                     match receiver.recv().await {
@@ -224,6 +226,7 @@ impl RemoteTunnel {
                                 break;
                             }
                         }
+                        Some(OpenChannelMsg::Msg(ChannelMsg::Eof)) => return Ok(()),
                         Some(OpenChannelMsg::Msg(msg)) => {
                             panic!("unexpected channel msg: {:?}", msg);
                         }
