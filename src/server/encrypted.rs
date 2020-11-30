@@ -283,7 +283,7 @@ impl Encrypted {
         let pubkey_key = r.read_string()?;
         debug!("algo: {:?}, key: {:?}", pubkey_algo, pubkey_key);
         match key::PublicKey::parse(pubkey_algo, pubkey_key) {
-            Ok(pubkey) => {
+            Ok(mut pubkey) => {
                 debug!("is_real = {:?}", is_real);
 
                 if is_real != 0 {
@@ -300,6 +300,7 @@ impl Encrypted {
                     debug!("signature = {:?}", signature);
                     let mut s = signature.reader(0);
                     let algo_ = s.read_string()?;
+                    pubkey.set_algorithm(algo_);
                     debug!("algo_: {:?}", algo_);
                     let sig = s.read_string()?;
                     let init = &buf[0..pos0];

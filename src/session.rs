@@ -224,7 +224,11 @@ impl Encrypted {
                 write.push_u32_be(channel.recipient_channel);
                 write.extend_ssh_string(&buf[..off]);
             });
-            debug!("buffer: {:?}", write.deref().len());
+            debug!(
+                "buffer: {:?} {:?}",
+                write.deref().len(),
+                channel.recipient_window_size
+            );
             channel.recipient_window_size -= off as u32;
             buf = &buf[off..]
         }

@@ -876,16 +876,14 @@ impl Session {
                     } else {
                         &buffer.buffer[5..]
                     };
-                    if buf.is_empty() {
-                        continue
-                    }
                     trace!("decompressed buffer: {}", pretty_hex::pretty_hex(&buf));
-                    if buf[0] == crate::msg::DISCONNECT {
-                        break;
-                    } else if buf[0] <= 4 {
-                        continue;
+                    if !buf.is_empty() {
+                        if buf[0] == crate::msg::DISCONNECT {
+                            break;
+                        } else if buf[0] > 4 {
+                            self = reply(self, &mut handler, &mut encrypted_signal, &buf[..]).await?;
+                        }
                     }
-                    self = reply(self, &mut handler, &mut encrypted_signal, &buf[..]).await?;
                     reading.set(start_reading(stream_read, buffer, self.common.cipher.clone()));
                 }
                 msg = self.receiver.recv(), if !self.is_rekeying() => {

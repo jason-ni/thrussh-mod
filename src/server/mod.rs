@@ -508,20 +508,18 @@ where
                 } else {
                     &buffer.buffer[5..]
                 };
-                if buf.is_empty() {
-                    continue
-                }
-                if buf[0] == crate::msg::DISCONNECT {
-                    debug!("break");
-                    break;
-                } else if buf[0] <= 4 {
-                    continue;
-                }
-                match reply(session, &mut handler, &buf[..]).await {
-                    Ok(s) => session = s,
-                    Err(e) => {
-                        error!("{:?}", e);
-                        return Err(e)
+                if !buf.is_empty() {
+                    if buf[0] == crate::msg::DISCONNECT {
+                        debug!("break");
+                        break;
+                    } else if buf[0] > 4 {
+                        match reply(session, &mut handler, &buf[..]).await {
+                            Ok(s) => session = s,
+                            Err(e) => {
+                                error!("{:?}", e);
+                                return Err(e)
+                            }
+                        }
                     }
                 }
                 reading.set(start_reading(stream_read, buffer, session.common.cipher.clone()));

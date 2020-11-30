@@ -108,21 +108,25 @@ pub async fn read<'a, R: AsyncRead + Unpin>(
     buffer: &'a mut SSHBuffer,
     pair: &'a CipherPair,
 ) -> Result<usize, anyhow::Error> {
-    let mut len = [0; 4];
-    stream.read_exact(&mut len).await?;
-    debug!("len = {:?}", len);
-    {
-        let key = pair.remote_to_local.as_opening_key();
-        let seqn = buffer.seqn.0;
-        buffer.buffer.clear();
-        buffer.buffer.extend(&len);
-        let len = key.decrypt_packet_length(seqn, len);
-        let len = BigEndian::read_u32(&len) as usize + key.tag_len();
-        debug!("clear len = {:?}", len);
-        buffer.buffer.resize(len + 4);
+    if buffer.len == 0 {
+        let mut len = [0; 4];
+        stream.read_exact(&mut len).await?;
+        debug!("reading, len = {:?}", len);
+        {
+            let key = pair.remote_to_local.as_opening_key();
+            let seqn = buffer.seqn.0;
+            buffer.buffer.clear();
+            buffer.buffer.extend(&len);
+            debug!("reading, seqn = {:?}", seqn);
+            let len = key.decrypt_packet_length(seqn, len);
+            buffer.len = BigEndian::read_u32(&len) as usize + key.tag_len();
+            debug!("reading, clear len = {:?}", buffer.len);
+        }
     }
+    buffer.buffer.resize(buffer.len + 4);
+    debug!("read_exact {:?}", buffer.len + 4);
     stream.read_exact(&mut buffer.buffer[4..]).await?;
-    trace!("received encrypted bytes: {}", pretty_hex::pretty_hex(&buffer.buffer[..].as_ref()));
+    debug!("read_exact done");
     let key = pair.remote_to_local.as_opening_key();
     let seqn = buffer.seqn.0;
     let ciphertext_len = buffer.buffer.len() - key.tag_len();
@@ -130,7 +134,7 @@ pub async fn read<'a, R: AsyncRead + Unpin>(
     let plaintext = key.open(seqn, ciphertext, tag)?;
 
     let padding_length = plaintext[0] as usize;
-    debug!("padding_length {:?}", padding_length);
+    debug!("reading, padding_length {:?}", padding_length);
     let plaintext_end = plaintext
         .len()
         .checked_sub(padding_length)
@@ -154,7 +158,11 @@ impl CipherPair {
         // The variables `payload`, `packet_length` and `padding_length` refer
         // to the protocol fields of the same names.
 
-        trace!("CipherPair writing into buffer: {}", pretty_hex::pretty_hex(&payload.as_ref()));
+        trace!(
+            "CipherPair writing into buffer: {}",
+            pretty_hex::pretty_hex(&payload.as_ref())
+        );
+        debug!("writing, seqn = {:?}", buffer.seqn.0);
         let key = self.local_to_remote.as_sealing_key();
 
         let padding_length = key.padding_length(payload);

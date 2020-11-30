@@ -303,7 +303,7 @@ impl super::Session {
                 Ok(s)
             }
             msg::CHANNEL_EOF => {
-                debug!("channel_close");
+                debug!("channel_eof");
                 let mut r = buf.reader(1);
                 let channel_num = ChannelId(r.read_u32()?);
                 let c = client.take().unwrap();

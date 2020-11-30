@@ -13,14 +13,18 @@ impl KexInit {
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<KexDhDone, anyhow::Error> {
-        trace!("client parse key exchange init packet {}", pretty_hex::pretty_hex(&buf));
-        let algo = if self.algo.is_none() {
+        trace!(
+            "client parse key exchange init packet {}",
+            pretty_hex::pretty_hex(&buf)
+        );
+        let algo = {
             // read algorithms from packet.
-            trace!("extending {}", pretty_hex::pretty_hex(&self.exchange.server_kex_init[..].as_ref()));
+            trace!(
+                "extending {}",
+                pretty_hex::pretty_hex(&self.exchange.server_kex_init[..].as_ref())
+            );
             self.exchange.server_kex_init.extend(buf);
             super::negotiation::Client::read_kex(buf, &config.preferred)?
-        } else {
-            return Err(Error::Kex.into());
         };
         debug!("algo = {:?}", algo);
         debug!("write = {:?}", &write_buffer.buffer[..]);

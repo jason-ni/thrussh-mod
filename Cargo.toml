@@ -2,7 +2,7 @@
 name = "thrussh"
 description = "A client and server SSH library."
 keywords = ["ssh"]
-version = "0.30.2"
+version = "0.30.6"
 authors = ["Pierre-Étienne Meunier <pe@pijul.org>"]
 repository = "https://nest.pijul.com/pijul_org/thrussh"
 homepage = "https://pijul.org/thrussh"
@@ -44,7 +44,7 @@ default = [ "flate2" ]
 byteorder = "1.3"
 bitflags = "1.2"
 log = { version = "0.4", features = ["release_max_level_off"] }
-thrussh-keys = "0.19.1"
+thrussh-keys = "0.19.2"
 openssl = "0.10"
 thrussh-libsodium = "0.2"
 cryptovec = "0.6.0"

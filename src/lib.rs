@@ -673,7 +673,7 @@ mod test_compress {
         {
             debug!("authenticated");
             if let Ok(mut channel) = session.channel_open_session().await {
-                channel.data(b"Hello, world!").await.unwrap();
+                channel.data(&b"Hello, world!"[..]).await.unwrap();
                 if let Some(msg) = channel.wait().await {
                     println!("{:?}", msg)
                 }
