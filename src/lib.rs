@@ -452,9 +452,9 @@ impl Default for Limits {
         // Following the recommendations of
         // https://tools.ietf.org/html/rfc4253#section-9
         Limits {
-            rekey_write_limit: (1 << 30) / 2, // 0.5 Gb
-            rekey_read_limit: (1 << 30) / 2,  // 0.5 Gb
-            rekey_time_limit: std::time::Duration::from_secs(3000),
+            rekey_write_limit: 1 << 30, // 1 Gb
+            rekey_read_limit: 1 << 30,  // 1 Gb
+            rekey_time_limit: std::time::Duration::from_secs(3600),
         }
     }
 }
