@@ -47,6 +47,7 @@ mod kex;
 mod session;
 
 pub mod proxy;
+pub mod shell;
 pub mod tunnel;
 
 pub struct Session {

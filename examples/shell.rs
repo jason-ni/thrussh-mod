@@ -5,6 +5,7 @@ extern crate thrussh_keys;
 extern crate tokio;
 use anyhow::Context;
 use std::sync::Arc;
+use thrussh::client::shell::{prepare_shell, ShellChannel};
 use thrussh::*;
 use thrussh_keys::*;
 
@@ -25,6 +26,10 @@ impl client::Handler for Client {
         self.finished_bool(true)
     }
 }
+
+use bytes::BytesMut;
+use futures::FutureExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() {
@@ -47,49 +52,24 @@ async fn main() {
         .unwrap();
     assert!(auth_res, true);
     let mut channel = session.channel_open_session().await.unwrap();
-    channel
-        .request_pty(true, "vt100", 80, 60, 640, 480, &[])
-        .await
-        .unwrap();
-    if let Some(msg) = channel.wait().await {
-        println!("response of pty in channel: {:?}", msg);
-        channel.request_shell(true).await.unwrap();
-        println!("request shell");
-        if let Some(msg) = channel.wait().await {
-            println!("response of shell in channel: {:?}", msg);
-            match msg {
-                ChannelMsg::WindowAdjusted { new_size } => {
-                    println!("server tells us initial window size: {}", new_size);
-                }
-                other => {
-                    println!("other msg: {:?}", other);
-                }
-            };
-        }
-        println!("should be success message");
-        if let Some(msg) = channel.wait().await {
-            println!("response of shell in channel: {:?}", msg);
-            match msg {
-                ChannelMsg::Success => {
-                    println!("shell request success");
-                }
-                other => {
-                    println!("other msg: {:?}", other);
-                }
-            }
+    let mut channel = prepare_shell(channel).await.unwrap();
 
-            channel.data("top\n".as_bytes()).await.unwrap();
-            while let Some(msg) = channel.wait().await {
-                match msg {
-                    ChannelMsg::Data { data } => {
-                        println!("{}", String::from_utf8_lossy(data.as_ref()));
-                    }
-                    other => println!("other message: {:?}", other),
-                }
-            }
+    let (mut shell_reader, mut shell_writer) = channel.split().unwrap();
+    let fut = async move {
+        let mut buf = BytesMut::with_capacity(1024);
+        loop {
+            tokio::io::stdin().read_buf(&mut buf).await.unwrap();
+            shell_writer.write_all(&buf).await.unwrap();
         }
-        tokio::time::sleep(std::time::Duration::from_secs(10000)).await;
+    };
+    tokio::spawn(fut.boxed());
+    let mut buf: BytesMut = BytesMut::with_capacity(1024);
+    loop {
+        shell_reader.read_buf(&mut buf).await.unwrap();
+        tokio::io::stdout().write_all(&buf).await.unwrap();
     }
+
+    tokio::time::sleep(std::time::Duration::from_secs(10000)).await;
     session
         .disconnect(Disconnect::ByApplication, "", "English")
         .await
