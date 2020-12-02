@@ -5,7 +5,7 @@ extern crate thrussh_keys;
 extern crate tokio;
 use anyhow::Context;
 use std::sync::Arc;
-use thrussh::client::shell::{prepare_shell, ShellChannel};
+use thrussh::client::shell::{upgrade_to_shell, ShellChannel};
 use thrussh::*;
 use thrussh_keys::*;
 
@@ -52,7 +52,7 @@ async fn main() {
         .unwrap();
     assert!(auth_res, true);
     let mut channel = session.channel_open_session().await.unwrap();
-    let mut channel = prepare_shell(channel).await.unwrap();
+    let mut channel = upgrade_to_shell(channel).await.unwrap();
 
     let (mut shell_reader, mut shell_writer) = channel.split().unwrap();
     let fut = async move {
@@ -67,6 +67,7 @@ async fn main() {
     loop {
         shell_reader.read_buf(&mut buf).await.unwrap();
         tokio::io::stdout().write_all(&buf).await.unwrap();
+        buf.clear();
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(10000)).await;

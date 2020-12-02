@@ -15,9 +15,9 @@ pub trait ShellChannel {
     fn split(self) -> Result<(ShellReader, ShellWriter), anyhow::Error>;
 }
 
-pub async fn prepare_shell(mut channel: Channel) -> Result<Channel, anyhow::Error> {
+pub async fn upgrade_to_shell(mut channel: Channel) -> Result<Channel, anyhow::Error> {
     channel
-        .request_pty(true, "vt100", 80, 40, 640, 480, &[])
+        .request_pty(true, "xterm", 126, 24, 640, 480, &[])
         .await?;
     debug!("requested pty");
     match channel.wait().await {
