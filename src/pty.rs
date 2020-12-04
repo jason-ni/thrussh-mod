@@ -34,6 +34,7 @@ pub enum Pty {
     IXANY = 39,
     IXOFF = 40,
     IMAXBEL = 41,
+    IUTF8 = 42,
     ISIG = 50,
     ICANON = 51,
     XCASE = 52,

@@ -1,4 +1,5 @@
 use crate::client::{Channel, ChannelSender, Msg, OpenChannelMsg};
+use crate::pty::Pty;
 use crate::ChannelMsg;
 use anyhow::Error;
 use anyhow::{Chain, Context};
@@ -16,8 +17,16 @@ pub trait ShellChannel {
 }
 
 pub async fn upgrade_to_shell(mut channel: Channel) -> Result<Channel, anyhow::Error> {
+    let tty_modes = [
+        (Pty::VERASE, 127),
+        (Pty::IUTF8, 1),
+        (Pty::ECHO, 1),
+        (Pty::VQUIT, 28),
+        (Pty::TTY_OP_ISPEED, 36000),
+        (Pty::TTY_OP_OSPEED, 36000),
+    ];
     channel
-        .request_pty(true, "xterm", 126, 24, 640, 480, &[])
+        .request_pty(true, "xterm", 126, 24, 640, 480, &tty_modes)
         .await?;
     debug!("requested pty");
     match channel.wait().await {
@@ -217,8 +226,9 @@ impl AsyncWrite for ShellWriter {
         let sendable = buf
             .len()
             .min((me.max_packet_size - 64).min(me.window_size) as usize);
-        let mut c = CryptoVec::new_zeroed(sendable);
-        match c.write_all(&buf[..sendable]) {
+        let mut c = CryptoVec::new_zeroed(0);
+        let ss = &buf[..sendable];
+        match c.write(&buf[..sendable]) {
             Ok(_) => (),
             Err(e) => return Poll::Ready(Err(e)),
         };
