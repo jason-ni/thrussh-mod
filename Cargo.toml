@@ -45,7 +45,7 @@ bytes = "0.6.0"
 byteorder = "1.3"
 bitflags = "1.2"
 log = { version = "0.4", features = ["release_max_level_off"] }
-thrussh-keys = "0.19.2"
+thrussh-keys = "0.19.4"
 openssl = "0.10"
 thrussh-libsodium = "0.2"
 cryptovec = "0.6.0"
