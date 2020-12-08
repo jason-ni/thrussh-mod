@@ -178,6 +178,29 @@ pub struct ShellWriter {
     fut: Option<Pin<Box<dyn Future<Output = Result<(), SendError<Msg>>>>>>,
 }
 
+impl ShellWriter {
+    pub async fn window_change(
+        &mut self,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+    ) -> Result<(), anyhow::Error> {
+        self.channel_sender
+            .sender
+            .send(Msg::WindowChange {
+                id: self.channel_sender.id,
+                col_width,
+                row_height,
+                pix_width,
+                pix_height,
+            })
+            .await
+            .map_err(|_| crate::Error::SendError)?;
+        Ok(())
+    }
+}
+
 unsafe impl Send for ShellWriter {}
 
 async fn send_msg(sender: Sender<Msg>, msg: Msg) -> Result<(), SendError<Msg>> {
