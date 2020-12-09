@@ -115,6 +115,8 @@ impl ShellChannel for Channel {
             pending_send: false,
             pending_msg: None,
             fut: None,
+            flush_pending: false,
+            shutdown_flushed: false,
         };
         tokio::spawn(relay_msg_loop(reader_sender, writer_sender, self));
         Ok((reader, writer))
@@ -155,10 +157,7 @@ impl AsyncRead for ShellReader {
                     Poll::Ready(Ok(()))
                 }
                 Some(ChannelMsg::Eof) => Poll::Ready(Ok(())),
-                Some(other) => panic!(format!(
-                    "Unexpected msg in poll_read ShellReader: {:?}",
-                    other
-                )),
+                Some(other) => Poll::Pending,
                 None => panic!("unexpected empty msg in poll_read ShellReader"),
             },
             Poll::Pending => Poll::Pending,
@@ -176,6 +175,8 @@ pub struct ShellWriter {
     pending_send: bool,
     pending_msg: Option<Msg>,
     fut: Option<Pin<Box<dyn Future<Output = Result<(), SendError<Msg>>>>>>,
+    flush_pending: bool,
+    shutdown_flushed: bool,
 }
 
 impl ShellWriter {
@@ -207,13 +208,63 @@ async fn send_msg(sender: Sender<Msg>, msg: Msg) -> Result<(), SendError<Msg>> {
     sender.send(msg).await
 }
 
+fn do_poll_flush(
+    me: &mut &mut ShellWriter,
+    cx: &mut core::task::Context<'_>,
+) -> Poll<Result<(), tokio::io::Error>> {
+    if me.flush_pending {
+        let msg = Msg::FlushPending {
+            id: me.channel_sender.id,
+        };
+        let sender = me.channel_sender.sender.clone();
+        let fut = send_msg(sender, msg).boxed();
+        me.fut = Some(fut);
+    };
+    match &mut me.fut {
+        Some(fut) => match fut.poll_unpin(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Ok(())) => (),
+            Poll::Ready(Err(e)) => {
+                return Poll::Ready(Err(tokio::io::Error::new(
+                    tokio::io::ErrorKind::UnexpectedEof,
+                    e,
+                )))
+            }
+        },
+        None => (),
+    };
+    if me.fut.is_some() {
+        me.fut = None;
+    }
+    match Stream::poll_next(Pin::new(&mut me.receiver), cx) {
+        Poll::Ready(Some(msg)) => match msg {
+            ChannelMsg::WindowAdjusted { new_size } => {
+                me.window_size = new_size;
+                Poll::Pending
+            }
+            ChannelMsg::Eof => Poll::Ready(Ok(())), //TODO: what we should return if we find channel eof
+            ChannelMsg::FlushPendingAck { again } => {
+                me.flush_pending = false;
+                if again {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+            other => Poll::Pending,
+        },
+        Poll::Ready(None) => Poll::Ready(Ok(())),
+        Poll::Pending => Poll::Pending,
+    }
+}
+
 impl AsyncWrite for ShellWriter {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, tokio::io::Error>> {
-        let mut me = unsafe { &mut Pin::get_unchecked_mut(self) };
+        let me = unsafe { &mut Pin::get_unchecked_mut(self) };
         match &mut me.fut {
             Some(fut) => match fut.poll_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -238,7 +289,7 @@ impl AsyncWrite for ShellWriter {
                             }
                         }
                         ChannelMsg::Eof => return Poll::Ready(Ok(0)), //TODO: what we should return if we find channel eof
-                        other => (),
+                        _other => (),
                     },
                     Poll::Ready(None) => return Poll::Ready(Ok(0)),
                     Poll::Pending => return Poll::Pending,
@@ -250,7 +301,6 @@ impl AsyncWrite for ShellWriter {
             .len()
             .min((me.max_packet_size - 64).min(me.window_size) as usize);
         let mut c = CryptoVec::new_zeroed(0);
-        let ss = &buf[..sendable];
         match c.write(&buf[..sendable]) {
             Ok(_) => (),
             Err(e) => return Poll::Ready(Err(e)),
@@ -278,13 +328,45 @@ impl AsyncWrite for ShellWriter {
         self: Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> Poll<Result<(), tokio::io::Error>> {
-        unimplemented!()
+        let me = unsafe { &mut Pin::get_unchecked_mut(self) };
+        do_poll_flush(me, cx)
     }
 
     fn poll_shutdown(
         self: Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> Poll<Result<(), tokio::io::Error>> {
-        unimplemented!()
+        let me = unsafe { &mut Pin::get_unchecked_mut(self) };
+        if !me.shutdown_flushed {
+            match do_poll_flush(me, cx) {
+                Poll::Ready(Ok(())) => (),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+            me.shutdown_flushed = true
+        }
+
+        if me.fut.is_none() {
+            let msg = Msg::Eof {
+                id: me.channel_sender.id,
+            };
+            let sender = me.channel_sender.sender.clone();
+            let fut = send_msg(sender, msg).boxed();
+            me.fut = Some(fut);
+        }
+
+        let poll_res = match &mut me.fut {
+            Some(fut) => match fut.poll_unpin(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(tokio::io::Error::new(
+                    tokio::io::ErrorKind::UnexpectedEof,
+                    e,
+                ))),
+            },
+            None => Poll::Ready(Ok(())),
+        };
+        me.shutdown_flushed = false;
+        poll_res
     }
 }

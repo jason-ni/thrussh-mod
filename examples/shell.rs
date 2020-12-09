@@ -58,6 +58,7 @@ async fn main() {
     let fut = async move {
         let mut buf = BytesMut::with_capacity(1024);
         loop {
+            buf.clear();
             tokio::io::stdin().read_buf(&mut buf).await.unwrap();
             shell_writer.write_all(&buf).await.unwrap();
         }
