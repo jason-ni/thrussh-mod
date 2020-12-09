@@ -92,6 +92,14 @@ async fn relay_msg_loop(
             ChannelMsg::FlushPendingAck { again } => writer_sender
                 .send(ChannelMsg::FlushPendingAck { again })
                 .context("relay flush pending ack to writer failed")?,
+            ChannelMsg::ExitStatus { exit_status } => {
+                reader_sender
+                    .send(ChannelMsg::ExitStatus { exit_status })
+                    .context("relay exit status to reader failed")?;
+                writer_sender
+                    .send(ChannelMsg::ExitStatus { exit_status })
+                    .context("relay exit status to writer failed")?;
+            }
             other => panic!(format!("unexpected OpenChannelMsg: {:?}", other)),
         }
     }
@@ -157,6 +165,7 @@ impl AsyncRead for ShellReader {
                     Poll::Ready(Ok(()))
                 }
                 Some(ChannelMsg::Eof) => Poll::Ready(Ok(())),
+                Some(ChannelMsg::ExitStatus { .. }) => Poll::Ready(Ok(())),
                 Some(other) => Poll::Pending,
                 None => panic!("unexpected empty msg in poll_read ShellReader"),
             },
@@ -251,6 +260,7 @@ fn do_poll_flush(
                     Poll::Ready(Ok(()))
                 }
             }
+            ChannelMsg::ExitStatus { .. } => Poll::Ready(Ok(())),
             other => Poll::Pending,
         },
         Poll::Ready(None) => Poll::Ready(Ok(())),
@@ -289,6 +299,7 @@ impl AsyncWrite for ShellWriter {
                             }
                         }
                         ChannelMsg::Eof => return Poll::Ready(Ok(0)), //TODO: what we should return if we find channel eof
+                        ChannelMsg::ExitStatus { .. } => return Poll::Ready(Ok(0)),
                         _other => (),
                     },
                     Poll::Ready(None) => return Poll::Ready(Ok(0)),
