@@ -125,6 +125,7 @@ impl ShellChannel for Channel {
             fut: None,
             flush_pending: false,
             shutdown_flushed: false,
+            write_flushed: true,
         };
         tokio::spawn(relay_msg_loop(reader_sender, writer_sender, self));
         Ok((reader, writer))
@@ -186,6 +187,7 @@ pub struct ShellWriter {
     fut: Option<Pin<Box<dyn Future<Output = Result<(), SendError<Msg>>>>>>,
     flush_pending: bool,
     shutdown_flushed: bool,
+    write_flushed: bool,
 }
 
 impl ShellWriter {
@@ -273,6 +275,7 @@ fn do_poll_flush(
 }
 
 impl AsyncWrite for ShellWriter {
+    /*
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
@@ -312,6 +315,71 @@ impl AsyncWrite for ShellWriter {
             }
         }
         assert!(me.window_size > 0, true);
+        let sendable = buf
+            .len()
+            .min((me.max_packet_size - 64).min(me.window_size) as usize);
+        let mut c = CryptoVec::new_zeroed(0);
+        match c.write(&buf[..sendable]) {
+            Ok(_) => (),
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let msg = Msg::Data {
+            id: me.channel_sender.id,
+            data: c,
+        };
+        let sender = me.channel_sender.sender.clone();
+        let mut fut = send_msg(sender, msg).boxed();
+        match fut.poll_unpin(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(sendable)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(tokio::io::Error::new(
+                tokio::io::ErrorKind::UnexpectedEof,
+                e,
+            ))),
+            Poll::Pending => {
+                me.fut = Some(fut);
+                Poll::Pending
+            }
+        }
+    }
+     */
+
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, tokio::io::Error>> {
+        let me = unsafe { &mut Pin::get_unchecked_mut(self) };
+        if !me.write_flushed {
+            match do_poll_flush(me, cx) {
+                Poll::Ready(Ok(())) => (),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+            me.write_flushed = true;
+        }
+
+        match &mut me.fut {
+            Some(fut) => match fut.poll_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(())) => (),
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(tokio::io::Error::new(
+                        tokio::io::ErrorKind::UnexpectedEof,
+                        e,
+                    )))
+                }
+            },
+            None => (),
+        };
+        if me.fut.is_some() {
+            me.fut = None;
+        }
+
+        if me.window_size == 0 {
+            me.write_flushed = false;
+            return Poll::Pending;
+        }
+
         let sendable = buf
             .len()
             .min((me.max_packet_size - 64).min(me.window_size) as usize);
