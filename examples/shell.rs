@@ -3,9 +3,8 @@ extern crate futures;
 extern crate thrussh;
 extern crate thrussh_keys;
 extern crate tokio;
-use anyhow::Context;
 use std::sync::Arc;
-use thrussh::client::shell::{upgrade_to_shell, ShellChannel};
+use thrussh::client::{channel::ChannelExt, shell::upgrade_to_shell};
 use thrussh::*;
 use thrussh_keys::*;
 
@@ -51,8 +50,8 @@ async fn main() {
         .await
         .unwrap();
     assert!(auth_res, true);
-    let mut channel = session.channel_open_session().await.unwrap();
-    let mut channel = upgrade_to_shell(channel).await.unwrap();
+    let channel = session.channel_open_session().await.unwrap();
+    let channel = upgrade_to_shell(channel).await.unwrap();
 
     let (mut shell_reader, mut shell_writer) = channel.split().unwrap();
     let fut = async move {
@@ -70,12 +69,4 @@ async fn main() {
         tokio::io::stdout().write_all(&buf).await.unwrap();
         buf.clear();
     }
-
-    tokio::time::sleep(std::time::Duration::from_secs(10000)).await;
-    session
-        .disconnect(Disconnect::ByApplication, "", "English")
-        .await
-        .unwrap();
-    let res = session.await.context("session await");
-    println!("{:#?}", res);
 }
