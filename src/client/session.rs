@@ -283,7 +283,7 @@ impl Session {
                     if ch.pending_data.len() == 0 {
                         again = false;
                     }
-                    session_ch
+                    let _ = session_ch
                         .send(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again }))
                         .map_err(|e| error!("failed to send FlushPendingAck: {:?}", e));
                 }

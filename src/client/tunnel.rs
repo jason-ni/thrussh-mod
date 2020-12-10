@@ -1,14 +1,12 @@
-use cryptovec::CryptoVec;
-use thrussh_keys::key;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
-
-use crate::client::proxy::Stream::Tcp;
 use crate::client::{Channel, ChannelId, ChannelMsg, Handler, Msg, OpenChannelMsg, Session};
 use crate::Error;
+use cryptovec::CryptoVec;
 use std::net::SocketAddr;
+use thrussh_keys::key;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
 
 pub struct RemoteTunnel {
     addr: SocketAddr,

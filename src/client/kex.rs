@@ -1,7 +1,7 @@
 use super::*;
 use crate::cipher::CipherPair;
+use crate::negotiation;
 use crate::negotiation::Select;
-use crate::{negotiation, Error};
 
 use crate::kex;
 

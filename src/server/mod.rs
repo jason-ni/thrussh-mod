@@ -554,7 +554,7 @@ where
                     Some((id, ChannelMsg::Success)) => {
                         debug!("channel success {:?}", id);
                     }
-                    Some((id, ChannelMsg::FlushPendingAck {again})) => {
+                    Some((id, ChannelMsg::FlushPendingAck {..})) => {
                         debug!("flush pending ack {:?}", id);
                     }
                     None => {

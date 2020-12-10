@@ -46,6 +46,7 @@ mod encrypted;
 mod kex;
 mod session;
 
+pub mod channel;
 pub mod proxy;
 pub mod shell;
 pub mod tunnel;
@@ -1052,17 +1053,6 @@ impl Session {
                     }
                 }
             }
-        }
-        Ok(())
-    }
-
-    fn flush_without_rekey(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(ref mut enc) = self.common.encrypted {
-            enc.flush(
-                &self.common.config.as_ref().limits,
-                &mut self.common.cipher,
-                &mut self.common.write_buffer,
-            );
         }
         Ok(())
     }
