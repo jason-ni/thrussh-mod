@@ -225,7 +225,7 @@ fn do_poll_flush(
     me: &mut &mut ShellWriter,
     cx: &mut core::task::Context<'_>,
 ) -> Poll<Result<(), tokio::io::Error>> {
-    if me.flush_pending {
+    if !me.flush_pending {
         let msg = Msg::FlushPending {
             id: me.channel_sender.id,
         };
