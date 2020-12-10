@@ -167,7 +167,7 @@ impl AsyncRead for ShellReader {
                 Some(ChannelMsg::Eof) => Poll::Ready(Ok(())),
                 Some(ChannelMsg::ExitStatus { .. }) => Poll::Ready(Ok(())),
                 Some(other) => Poll::Pending,
-                None => panic!("unexpected empty msg in poll_read ShellReader"),
+                None => Poll::Ready(Ok(())),
             },
             Poll::Pending => Poll::Pending,
         }
@@ -208,6 +208,10 @@ impl ShellWriter {
             .await
             .map_err(|_| crate::Error::SendError)?;
         Ok(())
+    }
+
+    pub fn get_sender(&self) -> Sender<Msg> {
+        self.channel_sender.sender.clone()
     }
 }
 

@@ -178,6 +178,7 @@ pub enum Msg {
     FlushPending {
         id: ChannelId,
     },
+    KeepAlive,
 }
 
 #[derive(Debug)]
@@ -827,8 +828,14 @@ async fn start_reading<R: AsyncRead + Unpin>(
     cipher: Arc<crate::cipher::CipherPair>,
 ) -> Result<(usize, R, SSHBuffer), anyhow::Error> {
     buffer.buffer.clear();
-    let n = cipher::read(&mut stream_read, &mut buffer, &cipher).await?;
-    Ok((n, stream_read, buffer))
+    let res = cipher::read(&mut stream_read, &mut buffer, &cipher).await;
+    match res {
+        Ok(n) => Ok((n, stream_read, buffer)),
+        Err(e) => {
+            error!("failed to cipher read: {:?}", e);
+            Ok((0, stream_read, buffer))
+        }
+    }
 }
 
 impl Session {
@@ -943,6 +950,9 @@ impl Session {
                         },
                         Some(Msg::FlushPending {id}) => {
                             self.flush_pending_channel(id)
+                        },
+                        Some(Msg::KeepAlive) => {
+                            self.keep_alive()
                         },
                         None => {
                             self.common.disconnected = true;

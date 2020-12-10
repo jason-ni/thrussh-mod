@@ -340,6 +340,16 @@ impl Session {
         }
     }
 
+    pub fn keep_alive(&mut self) {
+        if let Some(ref mut enc) = self.common.encrypted {
+            push_packet!(enc.write, {
+                enc.write.push(msg::GLOBAL_REQUEST);
+                enc.write.extend_ssh_string(b"keepalive@openssh.com");
+                enc.write.push(0);
+            });
+        }
+    }
+
     pub fn data(&mut self, channel: ChannelId, data: CryptoVec) {
         if let Some(ref mut enc) = self.common.encrypted {
             enc.data(channel, data)
