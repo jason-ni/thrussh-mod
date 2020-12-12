@@ -14,6 +14,7 @@
 //
 use super::{Msg, Reply};
 use crate::auth;
+use crate::client::OpenChannelMsg;
 use crate::key::PubKey;
 use crate::msg;
 use crate::negotiation;
@@ -23,8 +24,9 @@ use crate::session::*;
 use crate::{ChannelId, ChannelOpenFailure, Error, Sig};
 use cryptovec::CryptoVec;
 use std::cell::RefCell;
+use std::net::{IpAddr, SocketAddr};
 use thrussh_keys::encoding::{Encoding, Reader};
-use tokio::sync::mpsc::{unbounded_channel, Sender};
+use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedSender};
 
 thread_local! {
     static SIGNATURE_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -456,7 +458,7 @@ impl super::Session {
                 *client = Some(c);
                 Ok(s)
             }
-            msg::CHANNEL_OPEN => self.client_handle_channel_open(client, buf).await,
+            msg::CHANNEL_OPEN => self.client_handle_channel_open(buf).await,
             _ => {
                 info!("Unhandled packet: {:?}", buf);
                 Ok(self)
@@ -467,24 +469,15 @@ impl super::Session {
     pub(crate) fn create_forwarded_tcpip_channel(
         &mut self,
         remote_channel: u32,
-        sender: Sender<Msg>,
+        sender: UnboundedSender<OpenChannelMsg>,
         window_size: u32,
         max_packet_size: u32,
-    ) -> Result<super::Channel, anyhow::Error> {
+    ) -> Result<(), anyhow::Error> {
         if let Some(ref mut enc) = self.common.encrypted {
             let forwarded_channel_id = enc.new_channel_id();
             let (open_msg_sender, open_msg_receiver) = unbounded_channel();
             self.channels.insert(forwarded_channel_id, open_msg_sender);
             debug!("=== channel inserted: {}", forwarded_channel_id.0);
-            let ch = super::Channel {
-                sender: super::ChannelSender {
-                    sender,
-                    id: forwarded_channel_id,
-                },
-                receiver: open_msg_receiver,
-                window_size,
-                max_packet_size,
-            };
             let enc_ch = crate::Channel {
                 recipient_channel: remote_channel,
                 sender_channel: forwarded_channel_id,
@@ -499,17 +492,23 @@ impl super::Session {
             };
             enc.channels.insert(forwarded_channel_id, enc_ch);
             self.confirm_channel_open(remote_channel, forwarded_channel_id.0);
-            Ok(ch)
+            sender
+                .send(OpenChannelMsg::Open {
+                    id: forwarded_channel_id,
+                    window_size,
+                    max_packet_size,
+                })
+                .map_err(|e| {
+                    error!("failed to send channel open msg on creating forwarded tcpip channel")
+                });
+            info!("=== sent open msg");
+            Ok(())
         } else {
             Err(Error::Inconsistent.into())
         }
     }
 
-    async fn client_handle_channel_open<C: super::Handler>(
-        mut self,
-        client: &mut Option<C>,
-        buf: &[u8],
-    ) -> Result<Self, anyhow::Error> {
+    async fn client_handle_channel_open(mut self, buf: &[u8]) -> Result<Self, anyhow::Error> {
         debug!("client handling channel open");
         // https://tools.ietf.org/html/rfc4254#section-5.1
         let mut r = buf.reader(1);
@@ -532,22 +531,24 @@ impl super::Session {
                 debug!("-- origin addr: {}", String::from_utf8_lossy(orig_addr));
                 let orig_port = r.read_u32()?;
                 debug!("-- origin port: {}", orig_port);
-                //self.confirm_channel_open(sender, local_channel.0);
-                let cl = client.take().unwrap();
-                let (c, m) = cl
-                    .channel_open_forwarded_tcpip_client(
-                        ChannelId(sender_channel),
-                        String::from_utf8_lossy(address).as_ref(),
-                        port,
-                        String::from_utf8_lossy(orig_addr).as_ref(),
-                        orig_port,
-                        window,
-                        maxpacket,
-                        self,
-                    )
-                    .await?;
-                *client = Some(c);
-                Ok(m)
+                let ip_addr: IpAddr = match String::from_utf8_lossy(address).parse() {
+                    Ok(add) => add,
+                    Err(e) => {
+                        error!("invalid forwarded-tcpip channel open request: {:?}", e);
+                        return Ok(self);
+                    }
+                };
+                let local_addr = SocketAddr::new(ip_addr, port as u16);
+                let ch = match self
+                    .remote_forward_channels
+                    .get(&local_addr)
+                    .and_then(|ch_id| self.channels.get(ch_id))
+                {
+                    Some(ch) => ch.clone(),
+                    None => return Ok(self),
+                };
+                self.create_forwarded_tcpip_channel(sender_channel, ch, window, maxpacket)?;
+                Ok(self)
             }
             t => {
                 debug!("unknown channel type: {:?}", t);

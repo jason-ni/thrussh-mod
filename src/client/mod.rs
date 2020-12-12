@@ -15,7 +15,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -56,6 +56,7 @@ pub struct Session {
     receiver: Receiver<Msg>,
     sender: UnboundedSender<Reply>,
     channels: HashMap<ChannelId, UnboundedSender<OpenChannelMsg>>,
+    remote_forward_channels: HashMap<SocketAddr, ChannelId>,
     target_window_size: u32,
 }
 
@@ -101,11 +102,13 @@ pub enum Msg {
         sender: UnboundedSender<OpenChannelMsg>,
     },
     TcpIpForward {
+        id: ChannelId,
         want_reply: bool,
         address: String,
         port: u32,
     },
     CancelTcpIpForward {
+        id: ChannelId,
         want_reply: bool,
         address: String,
         port: u32,
@@ -528,6 +531,7 @@ impl Channel {
         self.sender
             .sender
             .send(Msg::TcpIpForward {
+                id: self.sender.id,
                 want_reply,
                 address: address.into(),
                 port,
@@ -547,6 +551,7 @@ impl Channel {
         self.sender
             .sender
             .send(Msg::CancelTcpIpForward {
+                id: self.sender.id,
                 want_reply,
                 address: address.into(),
                 port,
@@ -808,6 +813,7 @@ where
         receiver,
         sender: sender2,
         channels: HashMap::new(),
+        remote_forward_channels: HashMap::new(),
     };
     session.read_ssh_id(sshid)?;
     let (encrypted_signal, encrypted_recv) = tokio::sync::oneshot::channel();
@@ -913,11 +919,11 @@ impl Session {
                             let id = self.channel_open_direct_tcpip(&host_to_connect, port_to_connect, &originator_address, originator_port)?;
                             self.channels.insert(id, sender);
                         }
-                        Some(Msg::TcpIpForward { want_reply, address, port }) => {
-                            self.tcpip_forward(want_reply, &address, port)
+                        Some(Msg::TcpIpForward { id, want_reply, address, port }) => {
+                            self.tcpip_forward(id, want_reply, &address, port)
                         },
-                        Some(Msg::CancelTcpIpForward { want_reply, address, port }) => {
-                            self.cancel_tcpip_forward(want_reply, &address, port)
+                        Some(Msg::CancelTcpIpForward { id, want_reply, address, port }) => {
+                            self.cancel_tcpip_forward(id, want_reply, &address, port)
                         },
                         Some(Msg::Disconnect { reason, description, language_tag }) => {
                             self.disconnect(reason, &description, &language_tag)
@@ -1344,22 +1350,6 @@ pub trait Handler: Sized {
         connected_port: u32,
         originator_address: &str,
         originator_port: u32,
-        session: Session,
-    ) -> Self::FutureUnit {
-        self.finished(session)
-    }
-
-    /// Called when a new channel is created.
-    #[allow(unused_variables)]
-    fn channel_open_forwarded_tcpip_client(
-        self,
-        channel: ChannelId,
-        connected_address: &str,
-        connected_port: u32,
-        originator_address: &str,
-        originator_port: u32,
-        window_size: u32,
-        max_packet_size: u32,
         session: Session,
     ) -> Self::FutureUnit {
         self.finished(session)

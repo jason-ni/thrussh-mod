@@ -266,34 +266,4 @@ impl Handler for TunnelClient {
         self.sender.replace(sender);
         self.finished(session)
     }
-    fn channel_open_forwarded_tcpip_client(
-        self,
-        channel: ChannelId,
-        connected_address: &str,
-        connected_port: u32,
-        originator_address: &str,
-        originator_port: u32,
-        window_size: u32,
-        max_packet_size: u32,
-        mut session: Session,
-    ) -> Self::FutureUnit {
-        debug!("client handling open forwarded tcpip request");
-        match &self.sender {
-            Some(ref sender) => {
-                let ch = session
-                    .create_forwarded_tcpip_channel(
-                        channel.0,
-                        sender.clone(),
-                        window_size,
-                        max_packet_size,
-                    )
-                    .unwrap();
-                let addr: SocketAddr = "127.0.0.1:8081".parse().unwrap();
-                let tunnel = RemoteTunnel::new(addr, ch);
-                tokio::spawn(tunnel.run());
-            }
-            None => panic!("client should connect first"),
-        }
-        self.finished(session)
-    }
 }

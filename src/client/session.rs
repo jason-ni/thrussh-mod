@@ -1,4 +1,6 @@
 use super::*;
+use std::net::IpAddr;
+use std::str::FromStr;
 
 impl Session {
     pub fn channel_open_session(&mut self) -> Result<ChannelId, anyhow::Error> {
@@ -316,8 +318,16 @@ impl Session {
         }
     }
 
-    pub fn tcpip_forward(&mut self, want_reply: bool, address: &str, port: u32) {
+    pub fn tcpip_forward(&mut self, id: ChannelId, want_reply: bool, address: &str, port: u32) {
+        let local_addr: SocketAddr = SocketAddr::new(
+            IpAddr::from_str(address).expect("must be valid ip addrss"),
+            port as u16,
+        );
+        if !self.remote_forward_channels.contains_key(&local_addr) {
+            self.remote_forward_channels.insert(local_addr, id);
+        }
         if let Some(ref mut enc) = self.common.encrypted {
+            debug!("remote port: {:?}", local_addr);
             push_packet!(enc.write, {
                 enc.write.push(msg::GLOBAL_REQUEST);
                 enc.write.extend_ssh_string(b"tcpip-forward");
@@ -328,7 +338,22 @@ impl Session {
         }
     }
 
-    pub fn cancel_tcpip_forward(&mut self, want_reply: bool, address: &str, port: u32) {
+    pub fn cancel_tcpip_forward(
+        &mut self,
+        id: ChannelId,
+        want_reply: bool,
+        address: &str,
+        port: u32,
+    ) {
+        let local_addr: SocketAddr = SocketAddr::new(
+            IpAddr::from_str(address).expect("must be valid ip addrss"),
+            port as u16,
+        );
+        if let Some(ch_id) = self.remote_forward_channels.get(&local_addr) {
+            if id.eq(ch_id) {
+                self.remote_forward_channels.remove(&local_addr);
+            }
+        }
         if let Some(ref mut enc) = self.common.encrypted {
             push_packet!(enc.write, {
                 enc.write.push(msg::GLOBAL_REQUEST);

@@ -41,11 +41,9 @@ async fn main() {
         .tcpip_forward(false, "127.0.0.1", 8989)
         .await
         .unwrap();
-    /*
     if let Some(msg) = channel.wait().await {
         println!("=== {:#?}", msg);
     }
-     */
     tokio::time::sleep(std::time::Duration::from_secs(10000)).await;
     session
         .disconnect(Disconnect::ByApplication, "", "English")
