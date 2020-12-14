@@ -26,7 +26,7 @@ use cryptovec::CryptoVec;
 use std::cell::RefCell;
 use std::net::{IpAddr, SocketAddr};
 use thrussh_keys::encoding::{Encoding, Reader};
-use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 thread_local! {
     static SIGNATURE_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
@@ -492,14 +492,18 @@ impl super::Session {
             };
             enc.channels.insert(forwarded_channel_id, enc_ch);
             self.confirm_channel_open(remote_channel, forwarded_channel_id.0);
-            sender
+            let _ = sender
                 .send(OpenChannelMsg::Open {
                     id: forwarded_channel_id,
                     window_size,
                     max_packet_size,
+                    receiver: Some(open_msg_receiver),
                 })
                 .map_err(|e| {
-                    error!("failed to send channel open msg on creating forwarded tcpip channel")
+                    error!(
+                        "failed to send channel open msg on creating forwarded tcpip channel: {:?}",
+                        e
+                    )
                 });
             info!("=== sent open msg");
             Ok(())

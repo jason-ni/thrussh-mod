@@ -240,6 +240,7 @@ impl Encrypted {
         if let Some(channel) = self.channels.get_mut(&channel) {
             assert!(channel.confirmed);
             if !channel.pending_data.is_empty() {
+                debug!("push back to pending queue");
                 channel.pending_data.push_back((buf0, None, 0));
                 return;
             }

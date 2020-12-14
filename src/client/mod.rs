@@ -191,6 +191,7 @@ pub enum OpenChannelMsg {
         id: ChannelId,
         max_packet_size: u32,
         window_size: u32,
+        receiver: Option<UnboundedReceiver<OpenChannelMsg>>,
     },
     Msg(ChannelMsg),
 }
@@ -209,12 +210,13 @@ impl Drop for Handle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChannelSender {
     sender: Sender<Msg>,
     id: ChannelId,
 }
 
+#[derive(Debug)]
 pub struct Channel {
     sender: ChannelSender,
     receiver: UnboundedReceiver<OpenChannelMsg>,
@@ -315,6 +317,7 @@ impl Handle {
                     id,
                     max_packet_size,
                     window_size,
+                    receiver: None,
                 }) => {
                     return Ok(Channel {
                         sender: ChannelSender {
@@ -1291,6 +1294,7 @@ pub trait Handler: Sized {
                     id,
                     max_packet_size,
                     window_size,
+                    receiver: None,
                 })
                 .unwrap_or(());
         } else {

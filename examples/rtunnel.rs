@@ -4,13 +4,13 @@ extern crate thrussh;
 extern crate thrussh_keys;
 extern crate tokio;
 use anyhow::Context;
-use log::debug;
+use futures::{StreamExt, TryFutureExt};
+use log::{debug, error};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
+use thrussh::client::tunnel::{handle_connect, upgrade_to_remote_forward_tcpip_listener};
 use thrussh::*;
-use thrussh_keys::*;
-use tokio::net::TcpStream;
-use tokio::sync::mpsc::Sender;
 
 #[tokio::main]
 async fn main() {
@@ -32,25 +32,32 @@ async fn main() {
         .await
         .unwrap();
     println!("=== auth: {}", auth_res);
-    let mut channel = session
+    let channel = session
         .channel_open_session()
         .await
         .context("open channel")
         .unwrap();
-    channel
-        .tcpip_forward(false, "127.0.0.1", 8989)
+    let mut listener = upgrade_to_remote_forward_tcpip_listener(channel, "127.0.0.1", 8989)
         .await
         .unwrap();
-    if let Some(msg) = channel.wait().await {
-        println!("=== {:#?}", msg);
+    while let Some(channel) = listener.next().await {
+        println!("=== handling channel: {:?}", &channel);
+        tokio::spawn(handle_connect(
+            channel,
+            SocketAddr::from_str("127.0.0.1:8081").unwrap(),
+            |addr| {
+                debug!("=== connecting to {:?}", &addr);
+                tokio::net::TcpStream::connect(addr.clone()).map_err(move |e| {
+                    error!("failed to connect {:?}: {:?}", addr, &e);
+                    e
+                })
+            },
+        ));
     }
-    tokio::time::sleep(std::time::Duration::from_secs(10000)).await;
-    session
+    let _ = session
         .disconnect(Disconnect::ByApplication, "", "English")
         .await
         .map_err(|e| {
             println!("=== {:#?}", e);
         });
-    let res = session.await.context("session await");
-    println!("{:#?}", res);
 }

@@ -1,249 +1,62 @@
-use crate::client::{Channel, ChannelId, ChannelMsg, Handler, Msg, OpenChannelMsg, Session};
-use crate::Error;
-use cryptovec::CryptoVec;
-use std::net::SocketAddr;
+use crate::client::channel::ChannelExt;
+use crate::client::{Channel, ChannelSender, Handler, OpenChannelMsg, Session};
+use bytes::BytesMut;
+use core::pin::Pin;
+use futures::task::{Context, Poll};
+use futures::Stream;
+use std::fmt::Debug;
+use std::future::Future;
 use thrussh_keys::key;
-use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
 
-pub struct RemoteTunnel {
-    addr: SocketAddr,
-    sender: Sender<Msg>,
-    receiver: UnboundedReceiver<OpenChannelMsg>,
-    channel_id: ChannelId,
-    window_size: u32,
-    max_packet_size: u32,
-}
-
-impl RemoteTunnel {
-    pub fn new(addr: SocketAddr, ch: Channel) -> Self {
-        RemoteTunnel {
-            addr,
-            sender: ch.sender.sender,
-            receiver: ch.receiver,
-            channel_id: ch.sender.id,
-            window_size: ch.window_size,
-            max_packet_size: ch.max_packet_size,
+async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
+    mut r: R,
+    mut w: W,
+) -> Result<(), anyhow::Error> {
+    let mut buf = BytesMut::with_capacity(2048);
+    loop {
+        buf.clear();
+        trace!("==== reading from {:?}", &r);
+        let n = r.read_buf(&mut buf).await?;
+        trace!("==== read from {:?} {} bytes", &r, n);
+        if n == 0 {
+            trace!("==== read buf 0 end");
+            return Ok(());
         }
-    }
-
-    pub async fn run(self) -> Result<(), anyhow::Error> {
-        let stream = TcpStream::connect(self.addr).await?;
-        let (rh, wh) = stream.into_split();
-        let sender = self.sender.clone();
-        let (sender_tcp, receiver_tcp) = unbounded_channel();
-        let (sender_ssh, receiver_ssh) = unbounded_channel();
-        tokio::spawn(Self::receive_msg_loop(
-            self.receiver,
-            sender_tcp,
-            sender_ssh,
-        ));
-        tokio::spawn(Self::send_to_ssh_loop(
-            sender.clone(),
-            self.channel_id.clone(),
-            receiver_ssh,
-            self.window_size,
-            self.max_packet_size,
-            rh,
-        ));
-        tokio::spawn(Self::send_to_tcp_loop(
-            sender,
-            self.channel_id.clone(),
-            receiver_tcp,
-            wh,
-        ));
-        Ok(())
-    }
-
-    async fn receive_msg_loop(
-        mut msg_receiver: UnboundedReceiver<OpenChannelMsg>,
-        sender_tcp: UnboundedSender<OpenChannelMsg>,
-        sender_ssh: UnboundedSender<OpenChannelMsg>,
-    ) -> Result<(), anyhow::Error> {
-        loop {
-            if let Some(msg) = msg_receiver.recv().await {
-                match msg {
-                    OpenChannelMsg::Msg(ch_msg) => match ch_msg {
-                        ChannelMsg::Data { data } => {
-                            sender_tcp
-                                .send(OpenChannelMsg::Msg(ChannelMsg::Data { data }))
-                                .map_err(|_| Error::SendError)?;
-                        }
-                        ChannelMsg::Eof => {
-                            sender_tcp
-                                .send(OpenChannelMsg::Msg(ChannelMsg::Eof))
-                                .map_err(|_| Error::SendError)?;
-                            sender_ssh
-                                .send(OpenChannelMsg::Msg(ChannelMsg::Eof))
-                                .map_err(|_| Error::SendError)?;
-                        }
-                        ChannelMsg::WindowAdjusted { new_size } => {
-                            sender_ssh
-                                .send(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size }))
-                                .map_err(|_| Error::SendError)?;
-                        }
-                        ChannelMsg::FlushPendingAck { again } => {
-                            sender_ssh
-                                .send(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again }))
-                                .map_err(|_| Error::SendError)?;
-                        }
-                        x => panic!("unexpected ChannelMsg received: {:?}", x),
-                    },
-                    x => panic!("unexpected OpenChannelMsg received: {:?}", x),
-                }
-            } else {
-                return Ok(());
-            }
-        }
-    }
-
-    async fn send_to_tcp_loop(
-        sender: Sender<Msg>,
-        channel_id: ChannelId,
-        mut msg_receiver: UnboundedReceiver<OpenChannelMsg>,
-        mut writer: OwnedWriteHalf,
-    ) -> Result<(), anyhow::Error> {
-        debug!("send to tcp loop");
-        loop {
-            if let Some(msg) = msg_receiver.recv().await {
-                match msg {
-                    OpenChannelMsg::Msg(ch_msg) => match ch_msg {
-                        ChannelMsg::Data { data } => {
-                            writer.write_all(data.as_ref()).await?;
-                        }
-                        ChannelMsg::Eof => {
-                            debug!("ssh channel write part eof");
-                            break;
-                        }
-                        x => panic!("unexpected ChannelMsg: {:?}", x),
-                    },
-                    x => panic!("unexpected OpenChannelMsg: {:?}", x),
-                }
-            } else {
-                break;
-            }
-        }
-        debug!("exiting send_to_tcp_loop");
-        Ok(())
-    }
-
-    async fn send_to_ssh_loop<R: tokio::io::AsyncReadExt + std::marker::Unpin>(
-        sender: Sender<Msg>,
-        channel_id: ChannelId,
-        mut receiver: UnboundedReceiver<OpenChannelMsg>,
-        mut window_size: u32,
-        max_packet_size: u32,
-        mut data: R,
-    ) -> Result<(), anyhow::Error> {
-        let orig_window = window_size;
-        debug!("origin window size: {}", orig_window);
-        loop {
-            loop {
-                debug!(
-                    "sending data, window_size = {:?}, max_packet_size = {:?}",
-                    window_size, max_packet_size
-                );
-                let sendable = window_size.min(max_packet_size - 64) as usize;
-                //let page_len = 4096.min(sendable);
-                //let mut c = CryptoVec::new_zeroed(page_len);
-                let mut c = CryptoVec::new_zeroed(sendable);
-                let n = data.read(&mut c[..]).await?;
-                debug!("=== reading {} bytes from upstream", n);
-                c.resize(n);
-                window_size -= n as u32;
-                if n == 0 {
-                    debug!("=== read tcp socket end. window: {}", window_size);
-                    sender
-                        .send(Msg::FlushPending { id: channel_id })
-                        .await
-                        .map_err(|_| Error::SendError)?;
-                    loop {
-                        debug!("waiting on window size adjusting");
-                        match receiver.recv().await {
-                            Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
-                                debug!("ignoring window_size adjust: {}", window_size);
-                                window_size = new_size;
-                            }
-                            Some(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again })) => {
-                                if again || (window_size == 0) {
-                                    sender
-                                        .send(Msg::FlushPending { id: channel_id })
-                                        .await
-                                        .map_err(|_| Error::SendError)?;
-                                } else {
-                                    break;
-                                }
-                            }
-                            Some(OpenChannelMsg::Msg(ChannelMsg::Eof)) => break,
-                            Some(OpenChannelMsg::Msg(msg)) => {
-                                panic!("unexpected channel msg: {:?}", msg);
-                            }
-                            Some(_) => panic!("unexpected channel msg"),
-                            None => break,
-                        }
-                    }
-
-                    sender
-                        .send(Msg::Eof { id: channel_id })
-                        .await
-                        .map_err(|_| Error::SendError)?;
-                    return Ok(());
-                }
-                sender
-                    .send(Msg::Data {
-                        id: channel_id,
-                        data: c,
-                    })
-                    .await
-                    .map_err(|_| Error::SendError)?;
-                if window_size > 0 {
-                    break;
-                }
-                // wait for the window to be restored.
-                sender
-                    .send(Msg::FlushPending { id: channel_id })
-                    .await
-                    .map_err(|_| Error::SendError)?;
-
-                loop {
-                    debug!("waiting on window size adjusting");
-                    match receiver.recv().await {
-                        Some(OpenChannelMsg::Msg(ChannelMsg::WindowAdjusted { new_size })) => {
-                            debug!("ignoring window_size adjust: {}", window_size);
-                            window_size = new_size;
-                        }
-                        Some(OpenChannelMsg::Msg(ChannelMsg::FlushPendingAck { again })) => {
-                            if again || (window_size == 0) {
-                                sender
-                                    .send(Msg::FlushPending { id: channel_id })
-                                    .await
-                                    .map_err(|_| Error::SendError)?;
-                            } else {
-                                break;
-                            }
-                        }
-                        Some(OpenChannelMsg::Msg(ChannelMsg::Eof)) => return Ok(()),
-                        Some(OpenChannelMsg::Msg(msg)) => {
-                            panic!("unexpected channel msg: {:?}", msg);
-                        }
-                        Some(_) => panic!("unexpected channel msg"),
-                        None => break,
-                    }
-                }
-            }
-        }
+        w.write_all(&buf[..n]).await?;
+        trace!("=== written data to writer, reader {:?}", r);
     }
 }
 
-pub struct TunnelClient {
-    sender: Option<Sender<Msg>>,
+pub async fn handle_connect<F, Fut, C, E>(
+    channel: Channel,
+    conf: C,
+    conn_init: F,
+) -> Result<(), anyhow::Error>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnOnce(C) -> Fut,
+    Fut: Future<Output = Result<TcpStream, E>>,
+{
+    debug!("=== handling channel");
+    let stream = conn_init(conf).await?;
+    debug!("stream connected: {:?}", &stream);
+    let (stream_rh, stream_wh) = stream.into_split();
+    let (ch_rh, ch_wh) = channel.split()?;
+    debug!("channel splitted");
+    let cp1 = copy(ch_rh, stream_wh);
+    let cp2 = copy(stream_rh, ch_wh);
+    tokio::spawn(cp1);
+    tokio::spawn(cp2);
+    Ok(())
 }
+
+pub struct TunnelClient {}
 
 impl TunnelClient {
     pub fn new() -> Self {
-        TunnelClient { sender: None }
+        TunnelClient {}
     }
 }
 
@@ -261,9 +74,46 @@ impl Handler for TunnelClient {
         println!("check_server_key: {:?}", server_public_key);
         self.finished_bool(true)
     }
+}
 
-    fn on_session_connected(mut self, sender: Sender<Msg>, session: Session) -> Self::FutureUnit {
-        self.sender.replace(sender);
-        self.finished(session)
+pub struct RemoteForwardListener {
+    channel: Channel,
+}
+
+impl Stream for RemoteForwardListener {
+    type Item = Channel;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let me = unsafe { Pin::get_unchecked_mut(self) };
+        match Stream::poll_next(Pin::new(&mut me.channel.receiver), cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(msg)) => match msg {
+                OpenChannelMsg::Open {
+                    id,
+                    max_packet_size,
+                    window_size,
+                    receiver,
+                } => Poll::Ready(Some(Channel {
+                    sender: ChannelSender {
+                        sender: me.channel.sender.sender.clone(),
+                        id,
+                    },
+                    receiver: receiver.expect("receiver must exist"),
+                    window_size,
+                    max_packet_size,
+                })),
+                _ => Poll::Pending,
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+        }
     }
+}
+
+pub async fn upgrade_to_remote_forward_tcpip_listener<A: Into<String>>(
+    mut channel: Channel,
+    address: A,
+    port: u32,
+) -> Result<RemoteForwardListener, anyhow::Error> {
+    channel.tcpip_forward(false, address, port).await?;
+    Ok(RemoteForwardListener { channel })
 }

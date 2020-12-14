@@ -10,6 +10,7 @@ use std::io::Write;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc::{unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
 
+#[derive(Debug)]
 pub struct ChannelReader {
     receiver: UnboundedReceiver<ChannelMsg>,
     pending_buf: Option<CryptoVec>,
@@ -55,6 +56,7 @@ impl AsyncRead for ChannelReader {
 
 use core::future::Future;
 use tokio::sync::mpsc::error::SendError;
+
 pub struct ChannelWriter {
     channel_sender: ChannelSender,
     receiver: UnboundedReceiver<ChannelMsg>,
@@ -64,6 +66,7 @@ pub struct ChannelWriter {
     flush_pending: bool,
     shutdown_flushed: bool,
     write_flushed: bool,
+    pending_buf_size: usize,
 }
 
 impl ChannelWriter {
@@ -96,7 +99,10 @@ impl ChannelWriter {
 unsafe impl Send for ChannelWriter {}
 
 async fn send_msg(sender: Sender<Msg>, msg: Msg) -> Result<(), SendError<Msg>> {
-    sender.send(msg).await
+    sender.send(msg).await.map_err(|e| {
+        error!("=== send msg error: {:?}", e);
+        e
+    })
 }
 
 fn do_poll_flush(
@@ -169,7 +175,10 @@ impl AsyncWrite for ChannelWriter {
         match &mut me.fut {
             Some(fut) => match fut.poll_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(())) => (),
+                Poll::Ready(Ok(())) => {
+                    me.fut = None;
+                    return Poll::Ready(Ok(me.pending_buf_size));
+                }
                 Poll::Ready(Err(e)) => {
                     return Poll::Ready(Err(tokio::io::Error::new(
                         tokio::io::ErrorKind::UnexpectedEof,
@@ -179,9 +188,6 @@ impl AsyncWrite for ChannelWriter {
             },
             None => (),
         };
-        if me.fut.is_some() {
-            me.fut = None;
-        }
 
         if me.window_size == 0 {
             me.write_flushed = false;
@@ -210,6 +216,7 @@ impl AsyncWrite for ChannelWriter {
             ))),
             Poll::Pending => {
                 me.fut = Some(fut);
+                me.pending_buf_size = sendable;
                 Poll::Pending
             }
         }
@@ -284,6 +291,7 @@ impl ChannelExt for Channel {
             flush_pending: false,
             shutdown_flushed: false,
             write_flushed: true,
+            pending_buf_size: 0,
         };
         tokio::spawn(relay_msg_loop(reader_sender, writer_sender, self));
         Ok((reader, writer))
