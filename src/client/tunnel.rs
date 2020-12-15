@@ -21,7 +21,7 @@ async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
         let n = r.read_buf(&mut buf).await?;
         trace!("==== read from {:?} {} bytes", &r, n);
         if n == 0 {
-            trace!("==== read buf 0 end");
+            debug!("==== read buf 0 end");
             return Ok(());
         }
         w.write_all(&buf[..n]).await?;
@@ -30,17 +30,17 @@ async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
 }
 
 pub async fn handle_connect<F, Fut, C, E>(
-    channel: Channel,
+    mut channel: Channel,
     conf: C,
     conn_init: F,
 ) -> Result<(), anyhow::Error>
 where
     E: std::error::Error + Send + Sync + 'static,
-    F: FnOnce(C) -> Fut,
+    F: FnOnce(&mut Channel, C) -> Fut,
     Fut: Future<Output = Result<TcpStream, E>>,
 {
     debug!("=== handling channel");
-    let stream = conn_init(conf).await?;
+    let stream = conn_init(&mut channel, conf).await?;
     debug!("stream connected: {:?}", &stream);
     let (stream_rh, stream_wh) = stream.into_split();
     let (ch_rh, ch_wh) = channel.split()?;

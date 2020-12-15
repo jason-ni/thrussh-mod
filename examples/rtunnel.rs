@@ -45,7 +45,7 @@ async fn main() {
         tokio::spawn(handle_connect(
             channel,
             SocketAddr::from_str("127.0.0.1:8081").unwrap(),
-            |addr| {
+            |ch, addr| {
                 debug!("=== connecting to {:?}", &addr);
                 tokio::net::TcpStream::connect(addr.clone()).map_err(move |e| {
                     error!("failed to connect {:?}: {:?}", addr, &e);
