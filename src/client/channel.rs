@@ -271,6 +271,7 @@ impl AsyncWrite for ChannelWriter {
 
 pub trait ChannelExt {
     fn split(self) -> Result<(ChannelReader, ChannelWriter), anyhow::Error>;
+    fn get_sender(&self) -> Sender<Msg>;
 }
 
 impl ChannelExt for Channel {
@@ -295,6 +296,10 @@ impl ChannelExt for Channel {
         };
         tokio::spawn(relay_msg_loop(reader_sender, writer_sender, self));
         Ok((reader, writer))
+    }
+
+    fn get_sender(&self) -> Sender<Msg> {
+        self.sender.sender.clone()
     }
 }
 async fn relay_msg_loop(
