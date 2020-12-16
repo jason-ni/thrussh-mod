@@ -6,7 +6,6 @@ pub async fn upgrade_to_shell(mut channel: Channel) -> Result<Channel, anyhow::E
     let tty_modes = [
         (Pty::VERASE, 127),
         (Pty::IUTF8, 1),
-        (Pty::ECHO, 1),
         (Pty::VQUIT, 28),
         (Pty::TTY_OP_ISPEED, 36000),
         (Pty::TTY_OP_OSPEED, 36000),
