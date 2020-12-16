@@ -505,7 +505,6 @@ impl super::Session {
                         e
                     )
                 });
-            info!("=== sent open msg");
             Ok(())
         } else {
             Err(Error::Inconsistent.into())

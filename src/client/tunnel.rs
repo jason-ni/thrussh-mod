@@ -1,4 +1,4 @@
-use crate::client::channel::ChannelExt;
+use crate::client::channel::{ChannelReader, ChannelWriter};
 use crate::client::{Channel, ChannelSender, Handler, OpenChannelMsg, Session};
 use bytes::BytesMut;
 use core::pin::Pin;
@@ -29,22 +29,19 @@ async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
     }
 }
 
-pub async fn handle_connect<F, Fut, C, E>(
-    mut channel: Channel,
+pub async fn handle_connect<F, Fut, C>(
+    channel: Channel,
     conf: C,
     conn_init: F,
 ) -> Result<(), anyhow::Error>
 where
-    E: std::error::Error + Send + Sync + 'static,
-    F: FnOnce(&mut Channel, C) -> Fut,
-    Fut: Future<Output = Result<TcpStream, E>>,
+    F: FnOnce(Channel, C) -> Fut,
+    Fut: Future<Output = Result<(TcpStream, ChannelReader, ChannelWriter), anyhow::Error>>,
 {
     debug!("=== handling channel");
-    let stream = conn_init(&mut channel, conf).await?;
+    let (stream, ch_rh, ch_wh) = conn_init(channel, conf).await?;
     debug!("stream connected: {:?}", &stream);
     let (stream_rh, stream_wh) = stream.into_split();
-    let (ch_rh, ch_wh) = channel.split()?;
-    debug!("channel splitted");
     let cp1 = copy(ch_rh, stream_wh);
     let cp2 = copy(stream_rh, ch_wh);
     tokio::spawn(cp1);

@@ -9,8 +9,10 @@ use log::{debug, error};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use thrussh::client::channel::{ChannelExt, ChannelReader, ChannelWriter};
 use thrussh::client::tunnel::{handle_connect, upgrade_to_remote_forward_tcpip_listener};
 use thrussh::*;
+use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() {
@@ -47,10 +49,12 @@ async fn main() {
             SocketAddr::from_str("127.0.0.1:8081").unwrap(),
             |ch, addr| {
                 debug!("=== connecting to {:?}", &addr);
-                tokio::net::TcpStream::connect(addr.clone()).map_err(move |e| {
-                    error!("failed to connect {:?}: {:?}", addr, &e);
-                    e
-                })
+                let fut = async move {
+                    let (rh, wh) = ch.split()?;
+                    let stream = tokio::net::TcpStream::connect(addr.clone()).await?;
+                    Ok((stream, rh, wh))
+                };
+                fut
             },
         ));
     }
