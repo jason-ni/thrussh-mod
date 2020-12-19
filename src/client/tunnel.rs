@@ -10,9 +10,10 @@ use thrussh_keys::key;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
+pub async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
     mut r: R,
     mut w: W,
+    close_on_end: bool,
 ) -> Result<(), anyhow::Error> {
     let mut buf = BytesMut::with_capacity(2048);
     loop {
@@ -21,7 +22,14 @@ async fn copy<R: AsyncReadExt + Unpin + Debug, W: AsyncWriteExt + Unpin>(
         let n = r.read_buf(&mut buf).await?;
         trace!("==== read from {:?} {} bytes", &r, n);
         if n == 0 {
-            debug!("==== read buf 0 end");
+            debug!("==== read buf 0 end, reader: {:?}", &r);
+            if close_on_end {
+                // In X11 forwarding, when we close the X app in client side, only the tcp stream reads
+                // to the end. If we don't close the ssh channel, X app may hang on forever.
+                // For proxy usage, we may not want to close one side before another side pending on reading.
+                w.shutdown().await?;
+                debug!("=== shutdown complete, reader: {:?}", &r);
+            }
             return Ok(());
         }
         w.write_all(&buf[..n]).await?;
@@ -42,8 +50,8 @@ where
     let (stream, ch_rh, ch_wh) = conn_init(channel, conf).await?;
     debug!("stream connected: {:?}", &stream);
     let (stream_rh, stream_wh) = stream.into_split();
-    let cp1 = copy(ch_rh, stream_wh);
-    let cp2 = copy(stream_rh, ch_wh);
+    let cp1 = copy(ch_rh, stream_wh, false);
+    let cp2 = copy(stream_rh, ch_wh, false);
     tokio::spawn(cp1);
     tokio::spawn(cp2);
     Ok(())
@@ -75,6 +83,12 @@ impl Handler for TunnelClient {
 
 pub struct RemoteForwardListener {
     channel: Channel,
+}
+
+impl RemoteForwardListener {
+    pub fn new(channel: Channel) -> Self {
+        RemoteForwardListener { channel }
+    }
 }
 
 impl Stream for RemoteForwardListener {

@@ -553,6 +553,18 @@ impl super::Session {
                 self.create_forwarded_tcpip_channel(sender_channel, ch, window, maxpacket)?;
                 Ok(self)
             }
+            b"x11" => {
+                let orig_addr = r.read_string()?;
+                debug!("-- origin addr: {}", String::from_utf8_lossy(orig_addr));
+                let orig_port = r.read_u32()?;
+                debug!("-- origin port: {}", orig_port);
+                let ch = match self.x11_channel.and_then(|ch_id| self.channels.get(&ch_id)) {
+                    Some(ch) => ch.clone(),
+                    None => return Ok(self),
+                };
+                self.create_forwarded_tcpip_channel(sender_channel, ch.clone(), window, maxpacket)?;
+                Ok(self)
+            }
             t => {
                 debug!("unknown channel type: {:?}", t);
                 if let Some(ref mut enc) = self.common.encrypted {

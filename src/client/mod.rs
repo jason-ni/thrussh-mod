@@ -57,6 +57,7 @@ pub struct Session {
     sender: UnboundedSender<Reply>,
     channels: HashMap<ChannelId, UnboundedSender<OpenChannelMsg>>,
     remote_forward_channels: HashMap<SocketAddr, ChannelId>,
+    x11_channel: Option<ChannelId>,
     target_window_size: u32,
 }
 
@@ -160,6 +161,7 @@ pub enum Msg {
     },
     RequestX11 {
         id: ChannelId,
+        listen_id: ChannelId,
         want_reply: bool,
         single_connection: bool,
         x11_authentication_protocol: String,
@@ -570,6 +572,7 @@ impl Channel {
     /// for security issues related to cookies.
     pub async fn request_x11<A: Into<String>, B: Into<String>>(
         &mut self,
+        listen_channel: ChannelId,
         want_reply: bool,
         single_connection: bool,
         x11_authentication_protocol: A,
@@ -580,6 +583,7 @@ impl Channel {
             .sender
             .send(Msg::RequestX11 {
                 id: self.sender.id,
+                listen_id: listen_channel,
                 want_reply,
                 single_connection,
                 x11_authentication_protocol: x11_authentication_protocol.into(),
@@ -817,6 +821,7 @@ where
         sender: sender2,
         channels: HashMap::new(),
         remote_forward_channels: HashMap::new(),
+        x11_channel: None,
     };
     session.read_ssh_id(sshid)?;
     let (encrypted_signal, encrypted_recv) = tokio::sync::oneshot::channel();
@@ -940,8 +945,8 @@ impl Session {
                         Some(Msg::WindowChange { id, col_width, row_height, pix_width, pix_height }) => {
                             self.window_change(id, col_width, row_height, pix_width, pix_height)
                         },
-                        Some(Msg::RequestX11 { id, want_reply, single_connection, x11_authentication_protocol, x11_authentication_cookie, x11_screen_number }) => {
-                            self.request_x11(id, want_reply, single_connection, &x11_authentication_protocol, &x11_authentication_cookie, x11_screen_number)
+                        Some(Msg::RequestX11 { id, listen_id, want_reply, single_connection, x11_authentication_protocol, x11_authentication_cookie, x11_screen_number }) => {
+                            self.request_x11(id, listen_id, want_reply, single_connection, &x11_authentication_protocol, &x11_authentication_cookie, x11_screen_number)
                         },
                         Some(Msg::SetEnv { id, want_reply, variable_name, variable_value }) => {
                             self.set_env(id, want_reply, &variable_name, &variable_value)

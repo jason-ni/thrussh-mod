@@ -161,12 +161,16 @@ impl Session {
     pub fn request_x11(
         &mut self,
         channel: ChannelId,
+        listen_channel: ChannelId,
         want_reply: bool,
         single_connection: bool,
         x11_authentication_protocol: &str,
         x11_authentication_cookie: &str,
         x11_screen_number: u32,
     ) {
+        if self.x11_channel.is_none() {
+            self.x11_channel.replace(listen_channel);
+        }
         if let Some(ref mut enc) = self.common.encrypted {
             if let Some(channel) = enc.channels.get(&channel) {
                 push_packet!(enc.write, {

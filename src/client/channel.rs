@@ -64,7 +64,6 @@ pub struct ChannelWriter {
     window_size: u32,
     fut: Option<Pin<Box<dyn Future<Output = Result<(), SendError<Msg>>>>>>,
     flush_pending: bool,
-    shutdown_flushed: bool,
     write_flushed: bool,
     pending_buf_size: usize,
 }
@@ -235,14 +234,6 @@ impl AsyncWrite for ChannelWriter {
         cx: &mut core::task::Context<'_>,
     ) -> Poll<Result<(), tokio::io::Error>> {
         let me = unsafe { &mut Pin::get_unchecked_mut(self) };
-        if !me.shutdown_flushed {
-            match do_poll_flush(me, cx) {
-                Poll::Ready(Ok(())) => (),
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            }
-            me.shutdown_flushed = true
-        }
 
         if me.fut.is_none() {
             let msg = Msg::Eof {
@@ -264,7 +255,6 @@ impl AsyncWrite for ChannelWriter {
             },
             None => Poll::Ready(Ok(())),
         };
-        me.shutdown_flushed = false;
         poll_res
     }
 }
@@ -290,7 +280,6 @@ impl ChannelExt for Channel {
             window_size: self.window_size,
             fut: None,
             flush_pending: false,
-            shutdown_flushed: false,
             write_flushed: true,
             pending_buf_size: 0,
         };

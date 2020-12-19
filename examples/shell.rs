@@ -3,10 +3,12 @@ extern crate futures;
 extern crate thrussh;
 extern crate thrussh_keys;
 extern crate tokio;
+use std::str::FromStr;
 use std::sync::Arc;
 use thrussh::client::{channel::ChannelExt, shell::upgrade_to_shell};
 use thrussh::*;
 use thrussh_keys::*;
+use tokio::net::TcpStream;
 
 struct Client {}
 
@@ -27,7 +29,8 @@ impl client::Handler for Client {
 }
 
 use bytes::BytesMut;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
@@ -50,7 +53,45 @@ async fn main() {
         .await
         .unwrap();
     assert!(auth_res, true);
-    let channel = session.channel_open_session().await.unwrap();
+    let x11_channel = session.channel_open_session().await.unwrap();
+    let mut channel = session.channel_open_session().await.unwrap();
+
+    // The OpenSSH server assigns screen number automatically, if we request the x11_screen_number with 0.
+    channel
+        .request_x11(
+            x11_channel.id(),
+            false,
+            false,
+            "MIT-MAGIC-COOKIE-1",
+            "TEST",
+            0,
+        )
+        .await
+        .unwrap();
+    let listen_fut = async move {
+        let mut listener = thrussh::client::tunnel::RemoteForwardListener::new(x11_channel);
+        while let Some(mut ch) = listener.next().await {
+            let fut = async move {
+                // we assume the local display number is 127.0.0.1:0.0
+                let addr = SocketAddr::from_str("127.0.0.1:6000").unwrap();
+                let conn = match TcpStream::connect(addr).await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        // if we can't connect to X11 server, the forwarded channel should be closed.
+                        ch.eof().await;
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                };
+                let (conn_rh, conn_wh) = conn.into_split();
+                let (ch_rh, ch_wh) = ch.split().expect("split channel error");
+                tokio::spawn(thrussh::client::tunnel::copy(conn_rh, ch_wh, true));
+                tokio::spawn(thrussh::client::tunnel::copy(ch_rh, conn_wh, true));
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::spawn(fut);
+        }
+    };
+    tokio::spawn(listen_fut);
     let channel = upgrade_to_shell(channel).await.unwrap();
 
     let (mut shell_reader, mut shell_writer) = channel.split().unwrap();
