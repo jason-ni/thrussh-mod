@@ -327,6 +327,13 @@ async fn relay_msg_loop(
                     .send(ChannelMsg::ExitStatus { exit_status })
                     .context("relay exit status to writer failed")?;
             }
+            ChannelMsg::ExtendedData { data, ext } => {
+                debug!(
+                    "=== ExtendedData: {}",
+                    pretty_hex::pretty_hex(&data.as_ref())
+                );
+                debug!("=== ext: {}", ext);
+            }
             other => panic!(format!("unexpected OpenChannelMsg: {:?}", other)),
         }
     }
