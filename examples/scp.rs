@@ -81,6 +81,8 @@ async fn main() {
     println!("=== after write buf");
     wh.write_u8(0).await.unwrap();
     println!("=== after write zeo");
+    let ret = rh.read_u8().await.unwrap();
+    println!("=== last ret: {}", ret);
     wh.shutdown().await.unwrap();
     session
         .disconnect(Disconnect::ByApplication, "", "English")
